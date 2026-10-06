@@ -15,7 +15,12 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 
 if (-not (Test-Path ".env")) {
   $bytes = New-Object byte[] 48
-  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $rng.GetBytes($bytes)
+  } finally {
+    $rng.Dispose()
+  }
   $token = [Convert]::ToBase64String($bytes).Replace("+","-").Replace("/","_").TrimEnd("=")
   @"
 RUNNER_TOKEN=$token
@@ -32,8 +37,8 @@ SESSION_IDLE_MS=1800000
   Write-Host "runner/.env already exists; leaving it unchanged."
 }
 
-npm install
-npx playwright install chromium
+& npm.cmd install
+& npx.cmd playwright install chromium
 
 Write-Host ""
 Write-Host "Self-hosted browser runner is installed."
