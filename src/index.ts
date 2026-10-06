@@ -15,12 +15,16 @@ type AuthProps = {
   githubToken: string;
 };
 
+type AuthServerService = AuthorizationServerBinding<AuthProps> & {
+  getProviderClient(provider: "cloudflare" | "supabase"): Promise<{ clientId: string; clientSecret: string } | null>;
+};
+
 type Env = {
   BROWSER?: Fetcher;
   BROWSER_SESSIONS: DurableObjectNamespace<TenantBrowserSession>;
   PROVIDER_CONNECTIONS: DurableObjectNamespace<TenantConnections>;
   OAUTH_CONNECT_STATE: DurableObjectNamespace<OAuthConnectState>;
-  AUTH_SERVER: AuthorizationServerBinding<AuthProps>;
+  AUTH_SERVER: AuthServerService;
   CLOUDFLARE_OAUTH_CLIENT_ID?: string;
   CLOUDFLARE_OAUTH_CLIENT_SECRET?: string;
   SUPABASE_OAUTH_CLIENT_ID?: string;
@@ -240,18 +244,24 @@ async function deleteProviderConnection(env: Env, tenantId: string, provider: Pr
   await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider, { method: "DELETE" });
 }
 
-function providerClient(env: Env, provider: ProviderName): { clientId: string; clientSecret: string; callback: string } {
-  if (provider === "cloudflare") {
-    if (!env.CLOUDFLARE_OAUTH_CLIENT_ID || !env.CLOUDFLARE_OAUTH_CLIENT_SECRET) throw new Error("Cloudflare OAuth application is not configured.");
+async function providerClient(env: Env, provider: ProviderName): Promise<{ clientId: string; clientSecret: string; callback: string }> {
+  if (provider === "cloudflare" && env.CLOUDFLARE_OAUTH_CLIENT_ID && env.CLOUDFLARE_OAUTH_CLIENT_SECRET) {
     return { clientId: env.CLOUDFLARE_OAUTH_CLIENT_ID, clientSecret: env.CLOUDFLARE_OAUTH_CLIENT_SECRET, callback: CLOUDFLARE_CALLBACK };
   }
-  if (!env.SUPABASE_OAUTH_CLIENT_ID || !env.SUPABASE_OAUTH_CLIENT_SECRET) throw new Error("Supabase OAuth application is not configured.");
-  return { clientId: env.SUPABASE_OAUTH_CLIENT_ID, clientSecret: env.SUPABASE_OAUTH_CLIENT_SECRET, callback: SUPABASE_CALLBACK };
+  if (provider === "supabase" && env.SUPABASE_OAUTH_CLIENT_ID && env.SUPABASE_OAUTH_CLIENT_SECRET) {
+    return { clientId: env.SUPABASE_OAUTH_CLIENT_ID, clientSecret: env.SUPABASE_OAUTH_CLIENT_SECRET, callback: SUPABASE_CALLBACK };
+  }
+  const stored = await env.AUTH_SERVER.getProviderClient(provider);
+  if (!stored) throw new Error((provider === "cloudflare" ? "Cloudflare" : "Supabase") + " OAuth application is not configured.");
+  return {
+    ...stored,
+    callback: provider === "cloudflare" ? CLOUDFLARE_CALLBACK : SUPABASE_CALLBACK,
+  };
 }
 
-function providerConfigured(env: Env, provider: ProviderName): boolean {
+async function providerConfigured(env: Env, provider: ProviderName): Promise<boolean> {
   try {
-    providerClient(env, provider);
+    await providerClient(env, provider);
     return true;
   } catch {
     return false;
@@ -259,7 +269,7 @@ function providerConfigured(env: Env, provider: ProviderName): boolean {
 }
 
 async function beginProviderOAuth(env: Env, tenant: TenantContext, provider: ProviderName): Promise<string> {
-  const client = providerClient(env, provider);
+  const client = await providerClient(env, provider);
   const state = randomBase64Url(32);
   const verifier = randomBase64Url(48);
   const stateId = env.OAUTH_CONNECT_STATE.idFromName(state);
@@ -308,7 +318,7 @@ function basicAuth(clientId: string, clientSecret: string): string {
 }
 
 async function exchangeProviderCode(env: Env, provider: ProviderName, code: string, verifier: string): Promise<ProviderConnection> {
-  const client = providerClient(env, provider);
+  const client = await providerClient(env, provider);
   const tokenUrl = provider === "cloudflare"
     ? "https://dash.cloudflare.com/oauth2/token"
     : "https://api.supabase.com/v1/oauth/token";
@@ -346,7 +356,7 @@ async function exchangeProviderCode(env: Env, provider: ProviderName, code: stri
 
 async function refreshProviderConnection(env: Env, tenantId: string, provider: ProviderName, connection: ProviderConnection): Promise<ProviderConnection> {
   if (!connection.refreshToken || !connection.expiresAt || connection.expiresAt > Date.now() + 60_000) return connection;
-  const client = providerClient(env, provider);
+  const client = await providerClient(env, provider);
   const tokenUrl = provider === "cloudflare"
     ? "https://dash.cloudflare.com/oauth2/token"
     : "https://api.supabase.com/v1/oauth/token";
@@ -795,7 +805,7 @@ function createServer(tenant: TenantContext, env: Env) {
     },
     async () => result({
       provider: "cloudflare",
-      configured: providerConfigured(env, "cloudflare"),
+      configured: await providerConfigured(env, "cloudflare"),
       connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
       tenant: tenant.tenantId,
     }),
@@ -813,7 +823,7 @@ function createServer(tenant: TenantContext, env: Env) {
     async ({ confirm }: { confirm: boolean }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
       if (!confirm) return result({ requiresConfirmation: true, action: "connect_cloudflare" });
-      if (!providerConfigured(env, "cloudflare")) {
+      if (!await providerConfigured(env, "cloudflare")) {
         return result({
           provider: "cloudflare",
           configured: false,
@@ -901,7 +911,7 @@ function createServer(tenant: TenantContext, env: Env) {
     },
     async () => result({
       provider: "supabase",
-      configured: providerConfigured(env, "supabase"),
+      configured: await providerConfigured(env, "supabase"),
       connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
       tenant: tenant.tenantId,
     }),
@@ -919,7 +929,7 @@ function createServer(tenant: TenantContext, env: Env) {
     async ({ confirm }: { confirm: boolean }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
       if (!confirm) return result({ requiresConfirmation: true, action: "connect_supabase" });
-      if (!providerConfigured(env, "supabase")) {
+      if (!await providerConfigured(env, "supabase")) {
         return result({
           provider: "supabase",
           configured: false,
@@ -1441,15 +1451,19 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
+      const [cloudflareConfigured, supabaseConfigured] = await Promise.all([
+        providerConfigured(env, "cloudflare"),
+        providerConfigured(env, "supabase"),
+      ]);
       return Response.json({
         ok: true,
         service: "ravi-developer-agent",
-        version: "0.4.0",
+        version: "0.5.0",
         authentication: "oauth-2.1",
         providerOAuth: {
           storage: "tenant-durable-object-aes-256-at-rest",
-          cloudflareConfigured: providerConfigured(env, "cloudflare"),
-          supabaseConfigured: providerConfigured(env, "supabase"),
+          cloudflareConfigured,
+          supabaseConfigured,
         },
       }, { headers: { "cache-control": "no-store" } });
     }
@@ -1457,7 +1471,7 @@ export default {
     if (url.pathname === "/") {
       return Response.json({
         name: "Ravi Developer Agent",
-        version: "0.4.0",
+        version: "0.5.0",
         mcp: "/mcp",
         health: "/health",
         authentication: "OAuth 2.1 required for MCP",
