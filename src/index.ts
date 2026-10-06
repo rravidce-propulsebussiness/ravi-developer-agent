@@ -631,11 +631,7 @@ function createServer(tenant: TenantContext, env: Env) {
   const registerTool = (name: string, config: any, handler: any) => {
     const normalizedConfig = {
       ...config,
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        openWorldHint: openWorldTools.has(name),
-        ...(config?.annotations ?? {}),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true }),
       },
     };
     const wrapped = async (...args: any[]) => {
@@ -722,7 +718,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Delete My Ravi Developer Agent Data",
       description: "Permanently delete this authenticated user's Ravi Developer Agent provider connections, browser-session state, audit/rate records, stored GitHub user-token state, and Ravi Developer Agent OAuth grants. This does not delete external GitHub, Cloudflare, Supabase, or website data.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: false, destructiveHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: {
         confirm: z.boolean().default(false),
         confirmationText: z.string().max(64).default(""),
@@ -839,7 +835,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "List GitHub Repositories",
       description: "List repositories visible to the authenticated GitHub account.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: {
         visibility: z.enum(["all", "public", "private"]).default("all"),
       },
@@ -877,7 +873,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Read GitHub File",
       description: "Read a UTF-8 text file from a repository visible to the connected GitHub account.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: {
         owner: z.string().regex(/^[A-Za-z0-9_.-]+$/),
         repo: z.string().regex(/^[A-Za-z0-9_.-]+$/),
@@ -1068,7 +1064,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Connect Cloudflare",
       description: "Start a secure Cloudflare OAuth connection using PKCE. The user must review and approve Cloudflare's consent screen.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       inputSchema: { confirm: z.boolean().default(false) },
     },
     async ({ confirm }: { confirm: boolean }) => {
@@ -1096,7 +1092,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "List Cloudflare Accounts",
       description: "List Cloudflare accounts authorized for the connected tenant.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     async () => {
       const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
@@ -1126,7 +1122,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "List Cloudflare Workers",
       description: "List Worker scripts in an authorized Cloudflare account.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: { accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/) },
     },
     async ({ accountId }: { accountId: string }) => {
@@ -1158,7 +1154,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "List Worker Secret Names",
       description: "List secret binding names for a Worker. Secret values are never returned.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: {
         accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
         scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
@@ -1192,7 +1188,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Delete Worker Secret",
       description: "Delete a named Worker secret after explicit confirmation. The secret value is never exposed.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: false, destructiveHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: {
         accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
         scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
@@ -1285,7 +1281,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "List Cloudflare Builds",
       description: "List recent Workers Builds for an authorized Cloudflare account, including trigger and deployment status.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: {
         accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
         perPage: z.number().int().min(1).max(50).default(20),
@@ -1337,7 +1333,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Get Cloudflare Build",
       description: "Read the current status and outcome of one Workers Build.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: {
         accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
         buildUuid: z.string().uuid(),
@@ -1398,7 +1394,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Connect Supabase",
       description: "Start a secure Supabase Management API OAuth connection using PKCE. The user must review and approve Supabase's consent screen.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
       inputSchema: { confirm: z.boolean().default(false) },
     },
     async ({ confirm }: { confirm: boolean }) => {
@@ -1426,7 +1422,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "List Supabase Projects",
       description: "List Supabase projects available to the connected tenant through the Management API.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     async () => {
       const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
@@ -1461,7 +1457,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Get Supabase Project",
       description: "Read current project metadata and lifecycle status from the connected Supabase account.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: { projectRef: z.string().regex(/^[a-z0-9]{20}$/) },
     },
     async ({ projectRef }: { projectRef: string }) => {
@@ -1501,7 +1497,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Inspect Supabase Schema",
       description: "Read table and column metadata for one schema in a connected Supabase project. This tool does not return application table rows.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: {
         projectRef: z.string().regex(/^[a-z0-9]{20}$/),
         schema: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default("public"),
@@ -1536,7 +1532,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "Apply Supabase Migration",
       description: "Apply a named SQL migration to a connected Supabase project after explicit confirmation. Do not include credentials or secrets in SQL.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: false, destructiveHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
       inputSchema: {
         projectRef: z.string().regex(/^[a-z0-9]{20}$/),
         name: z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/),
@@ -1578,7 +1574,7 @@ function createServer(tenant: TenantContext, env: Env) {
       title: "List Supabase Migrations",
       description: "List applied migration versions for a connected Supabase project.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
       inputSchema: { projectRef: z.string().regex(/^[a-z0-9]{20}$/) },
     },
     async ({ projectRef }: { projectRef: string }) => {
