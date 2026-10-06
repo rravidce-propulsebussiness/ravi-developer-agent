@@ -7,6 +7,7 @@
   "observability": { "enabled": true },
   "browser": { "binding": "BROWSER" },
   "services": [{ "binding": "AUTH_SERVER", "service": "ravi-developer-agent-auth" }],
+  "kv_namespaces": [{ "binding": "CONNECTIONS_KV", "id": "ef5c73b94f2e48358ceff83731cfeeb2" }],
   "durable_objects": {
     "bindings": [{ "name": "BROWSER_SESSIONS", "class_name": "TenantBrowserSession" }]
   },
