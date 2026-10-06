@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { DurableObject } from "cloudflare:workers";
+import { registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 
 type Env = {
   AUTH_SERVER_URL?: string;
@@ -258,12 +259,22 @@ function createServer(tenant: TenantContext) {
     for (const byte of bytes) binary += String.fromCharCode(byte);
     return { content: [{ type: "image", data: btoa(binary), mimeType: "image/png" }] };
   });
+  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v1.html", {}, async () => ({
+    contents: [{
+      uri: "ui://ravi-developer-agent/browser-v1.html",
+      mimeType: RESOURCE_MIME_TYPE,
+      text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const u=v?.structuredContent?.liveView?.devtoolsFrontendUrl||v?.structuredContent?.liveView?.url||v?.liveView?.devtoolsFrontendUrl||v?.liveView?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params) });if(window.openai?.toolOutput)apply(window.openai.toolOutput);</script></body></html>`,
+      _meta: { ui: { prefersBorder: false, csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
+    }],
+  }));
+
   server.registerTool("browser_live_view", {
     title: "Browser Live View",
     description: "Create a short-lived read-only live view for an existing browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
+    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v1.html" } },
   }, async () => {
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
