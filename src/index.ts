@@ -144,6 +144,18 @@ function createServer(tenant: TenantContext) {
       return result({ tenant: tenant.tenantId, session });
     },
   );
+  server.registerTool("browser_tabs", {
+    title: "List Browser Tabs",
+    description: "List the current pages and live-view metadata in an existing tenant browser session.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: { sessionId: z.string().uuid() },
+  }, async ({ sessionId }) => {
+    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const response = await env.BROWSER.fetch(`https://browser-rendering/devtools/browser/${encodeURIComponent(sessionId)}/json/list?liveViewUrlExpiresInMs=300000`);
+    if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
+    return result({ tenant: tenant.tenantId, tabs: await response.json() });
+  });
   return server;
 }
 
