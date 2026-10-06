@@ -1998,6 +1998,59 @@ function createServer(tenant: TenantContext, env: Env) {
 const MCP_RESOURCE = "https://ravi-developer-agent.rvrmvth.workers.dev/mcp";
 const AUTH_ISSUER = "https://ravi-developer-agent-auth.rvrmvth.workers.dev";
 
+const PUBLIC_MCP_METHODS = new Set([
+  "initialize",
+  "notifications/initialized",
+  "tools/list",
+  "resources/list",
+  "resources/templates/list",
+  "prompts/list",
+  "ping",
+]);
+
+async function mcpMethod(request: Request): Promise<string | null> {
+  if (request.method !== "POST") return null;
+  try {
+    const body = await request.clone().json() as { method?: unknown };
+    return typeof body.method === "string" ? body.method : null;
+  } catch {
+    return null;
+  }
+}
+
+function anonymousDiscoveryTenant(): TenantContext {
+  return {
+    tenantId: "public-discovery",
+    subject: "public-discovery",
+    login: "public-discovery",
+    scopes: [],
+    githubToken: "",
+  };
+}
+
+async function publicMcpDiscovery(request: Request, env: Env): Promise<Response> {
+  const method = await mcpMethod(request);
+  if (!method || !PUBLIC_MCP_METHODS.has(method)) {
+    return new Response("Authentication required", {
+      status: 401,
+      headers: {
+        "www-authenticate": `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="agent:read"`,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  const mcp = createMcpHandler(() => createServer(anonymousDiscoveryTenant(), env), {
+    route: "/mcp",
+    onerror(error) {
+      console.error("Public MCP discovery error:", error.name, error.message, error.stack ?? "");
+    },
+  });
+  const response = await mcp.fetch(request);
+  console.log("Public MCP discovery", { method, status: response.status });
+  return response;
+}
+
 const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
   resourceMetadata: {
     resource: MCP_RESOURCE,
@@ -2155,7 +2208,15 @@ export default {
       return providerOAuthCallback(request, env, "supabase");
     }
 
-    if (url.pathname === "/mcp" || url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
+    if (url.pathname === "/mcp") {
+      const method = await mcpMethod(request);
+      if (method && PUBLIC_MCP_METHODS.has(method)) {
+        return publicMcpDiscovery(request, env);
+      }
+      return oauthMcp.fetch(request, env, ctx);
+    }
+
+    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
       return oauthMcp.fetch(request, env, ctx);
     }
 
