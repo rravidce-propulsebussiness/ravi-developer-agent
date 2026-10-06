@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { DurableObject } from "cloudflare:workers";
-import { registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
+import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 
 type Env = {
   AUTH_SERVER_URL?: string;
@@ -80,10 +80,10 @@ function hostnameAllowed(hostname: string, patterns: string[]): boolean {
   return patterns.some((pattern) => pattern.startsWith("*.") ? host.endsWith(pattern.slice(1)) && host !== pattern.slice(2) : host === pattern);
 }
 
-function createServer(tenant: TenantContext) {
+function createServer(tenant: TenantContext, env: Env) {
   const server = new McpServer({ name: "ravi-developer-agent", version: "0.2.0" });
 
-  server.registerTool(
+  registerAppTool(server, 
     "agent_status",
     {
       title: "Agent Status",
@@ -102,7 +102,7 @@ function createServer(tenant: TenantContext) {
     }),
   );
 
-  server.registerTool(
+  registerAppTool(server, 
     "project_plan",
     {
       title: "Project Plan",
@@ -130,7 +130,7 @@ function createServer(tenant: TenantContext) {
     }),
   );
 
-  server.registerTool(
+  registerAppTool(server, 
     "browser_capabilities",
     {
       title: "Browser Capabilities",
@@ -156,7 +156,7 @@ function createServer(tenant: TenantContext) {
     }),
   );
 
-  server.registerTool(
+  registerAppTool(server, 
     "browser_open",
     {
       title: "Open Website",
@@ -181,7 +181,7 @@ function createServer(tenant: TenantContext) {
       return result({ tenant: tenant.tenantId, url: target.toString(), snapshot: body.slice(0, 50000) });
     },
   );
-  server.registerTool(
+  registerAppTool(server, 
     "browser_session_start",
     {
       title: "Start Browser Session",
@@ -214,7 +214,7 @@ function createServer(tenant: TenantContext) {
       return result({ tenant: tenant.tenantId, browserReady: true });
     },
   );
-  server.registerTool("browser_tabs", {
+  registerAppTool(server, "browser_tabs", {
     title: "List Browser Tabs",
     description: "List the current pages and live-view metadata in an existing tenant browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
@@ -227,7 +227,7 @@ function createServer(tenant: TenantContext) {
     if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
     return result({ tenant: tenant.tenantId, tabs: await response.json() });
   });
-  server.registerTool("browser_tab_open", {
+  registerAppTool(server, "browser_tab_open", {
     title: "Open Browser Tab",
     description: "Open a public web URL in a new tab of an existing tenant browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
@@ -244,7 +244,7 @@ function createServer(tenant: TenantContext) {
     if (!response.ok) throw new Error("Browser tab open failed.");
     return result({ tenant: tenant.tenantId, tab: await response.json() });
   });
-  server.registerTool("browser_page_preview", {
+  registerAppTool(server, "browser_page_preview", {
     title: "Browser Page Preview",
     description: "Capture a PNG preview of a public web page for display in ChatGPT.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
@@ -268,7 +268,7 @@ function createServer(tenant: TenantContext) {
     }],
   }));
 
-  server.registerTool("browser_live_view", {
+  registerAppTool(server, "browser_live_view", {
     title: "Browser Live View",
     description: "Create a short-lived read-only live view for an existing browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
@@ -338,7 +338,7 @@ export default {
           },
         );
       }
-      const mcp = createMcpHandler(() => createServer(tenant), { route: "/mcp" });
+      const mcp = createMcpHandler(() => createServer(tenant, env), { route: "/mcp" });
       return mcp(request, env, ctx);
     }
 
