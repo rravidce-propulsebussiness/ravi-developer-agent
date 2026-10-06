@@ -796,6 +796,11 @@ function createServer(tenant: TenantContext, env: Env) {
           connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
         },
       },
+      browser: {
+        selfHostedConfigured: selfHostedBrowserConfigured(env),
+        selfHostedOrigin: selfHostedBrowserOrigin(env),
+        cloudflareFallbackAvailable: Boolean(env.BROWSER),
+      },
     }),
   );
 
@@ -856,15 +861,18 @@ function createServer(tenant: TenantContext, env: Env) {
       const browserOwner = env.BROWSER_SESSIONS.get(env.BROWSER_SESSIONS.idFromName(tenant.tenantId));
       try {
         const sessionResponse = await browserOwner.fetch("https://browser-session/session");
-        if (sessionResponse.ok && env.BROWSER) {
-          const session = await sessionResponse.json() as { sessionId?: string };
+        if (sessionResponse.ok) {
+          const session = await sessionResponse.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
           if (session.sessionId) {
-            const close = await env.BROWSER.fetch(
-              "https://browser-rendering/devtools/browser/" + encodeURIComponent(session.sessionId),
-              { method: "DELETE" },
-            );
-            browserClosed = close.ok || close.status === 404;
+            await closeBackendSession(env, {
+              sessionId: session.sessionId,
+              allowedDomains: session.allowedDomains ?? [],
+              backend: session.backend ?? "cloudflare",
+            });
+            browserClosed = true;
           }
+        } else {
+          browserClosed = true;
         }
       } catch {
         browserClosed = false;
@@ -1714,18 +1722,21 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_capabilities",
     {
       title: "Browser Capabilities",
-      description: "Describe the isolated cloud-browser capabilities available to this tenant. This tool does not navigate or modify websites.",
+      description: "Describe the isolated browser capabilities available to this tenant. This tool does not navigate or modify websites.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async () => result({
-      provider: "Cloudflare Browser Run",
+      provider: selfHostedBrowserConfigured(env) ? "Self-hosted Chromium (primary) + Cloudflare Browser Run (fallback)" : "Cloudflare Browser Run",
+      selfHostedConfigured: selfHostedBrowserConfigured(env),
+      selfHostedOrigin: selfHostedBrowserOrigin(env),
       capabilities: [
         "persistent tenant browser sessions",
-        "Cloudflare-enforced hostname guardrails",
+        "hostname guardrails on every browser request",
         "multiple tabs and safe page navigation",
         "tab activation and cleanup",
         "short-lived read-only Live View in ChatGPT",
+        "automatic Cloudflare fallback when the self-hosted runner is unavailable",
       ],
       isolation: "per-tenant browser context/session",
       navigationEnabled: true,
