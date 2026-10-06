@@ -1,12 +1,30 @@
 services:
   browser-runner:
-    build: .
+    build:
+      context: .
     restart: unless-stopped
+    init: true
     env_file:
       - .env
     environment:
       RUNNER_HOST: 0.0.0.0
       HEADLESS: "true"
+      BROWSER_PROFILE_DIR: /data/browser-profiles
     ports:
       - "127.0.0.1:8788:8788"
+    volumes:
+      - browser-runner-data:/data
     shm_size: "1gb"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'node -e "const http=require(\"http\");const r=http.request({host:\"127.0.0.1\",port:8788,path:\"/health\",headers:{authorization:\"Bearer \"+process.env.RUNNER_TOKEN}},x=>process.exit(x.statusCode===200?0:1));r.on(\"error\",()=>process.exit(1));r.end()"'
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  browser-runner-data:
