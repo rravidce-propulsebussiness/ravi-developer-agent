@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "ravi-developer-agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A tenant-isolated developer agent for GitHub, Cloudflare, Supabase, deployment workflows, and secure cloud-browser testing.",
   "author": {
     "name": "Ravi Developer Agent",
@@ -103,7 +103,7 @@
         "commerce": false
       },
       "publication": {
-        "release_notes": "Production 1.0 release with tenant-isolated OAuth, GitHub/Cloudflare/Supabase tools, guarded cloud browser, audit/rate controls, public legal endpoints, and self-service Ravi Developer Agent data deletion."
+        "release_notes": "1.0.1 adds the self-hosted Chromium backend and a cache-busting Browser Live Preview using authenticated screenshot streaming, while retaining Cloudflare Browser Run as fallback."
       }
     }
   }
