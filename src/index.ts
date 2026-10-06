@@ -902,6 +902,133 @@ function createServer(tenant: TenantContext, env: Env) {
   );
 
   registerTool(
+    "cloudflare_list_worker_secrets",
+    {
+      title: "List Worker Secret Names",
+      description: "List secret binding names for a Worker. Secret values are never returned.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
+        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
+      },
+    },
+    async ({ accountId, scriptName }: { accountId: string; scriptName: string }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch(
+        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
+          "/workers/scripts/" + encodeURIComponent(scriptName) + "/secrets",
+        { headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" } },
+      );
+      if (!response.ok) throw new Error("Cloudflare Worker secret listing failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: Array<{ name?: string; type?: string }>;
+      };
+      if (body.success === false) throw new Error("Cloudflare Worker secret listing failed.");
+      return result({
+        provider: "cloudflare",
+        accountId,
+        scriptName,
+        secrets: (body.result ?? []).map((item) => ({ name: item.name ?? null, type: item.type ?? null })),
+      });
+    },
+  );
+
+  registerTool(
+    "cloudflare_delete_worker_secret",
+    {
+      title: "Delete Worker Secret",
+      description: "Delete a named Worker secret after explicit confirmation. The secret value is never exposed.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
+        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
+        secretName: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ accountId, scriptName, secretName, confirm }: { accountId: string; scriptName: string; secretName: string; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({
+        requiresConfirmation: true,
+        action: "delete_worker_secret",
+        accountId,
+        scriptName,
+        secretName,
+      });
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch(
+        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
+          "/workers/scripts/" + encodeURIComponent(scriptName) + "/secrets/" + encodeURIComponent(secretName) + "?url_encoded=true",
+        {
+          method: "DELETE",
+          headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" },
+        },
+      );
+      if (!response.ok) throw new Error("Cloudflare Worker secret deletion failed (" + response.status + ").");
+      return result({ provider: "cloudflare", accountId, scriptName, secretName, deleted: true });
+    },
+  );
+
+  registerTool(
+    "cloudflare_trigger_build",
+    {
+      title: "Trigger Cloudflare Build",
+      description: "Trigger an existing Cloudflare Workers build by branch or commit after explicit confirmation.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
+        triggerUuid: z.string().uuid(),
+        branch: z.string().min(1).max(255).optional(),
+        commitHash: z.string().regex(/^[A-Fa-f0-9]{7,64}$/).optional(),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ accountId, triggerUuid, branch, commitHash, confirm }: { accountId: string; triggerUuid: string; branch?: string; commitHash?: string; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!branch && !commitHash) throw new Error("Provide either branch or commitHash.");
+      if (branch && commitHash) throw new Error("Provide only one of branch or commitHash.");
+      if (!confirm) return result({
+        requiresConfirmation: true,
+        action: "trigger_cloudflare_build",
+        accountId,
+        triggerUuid,
+        branch: branch ?? null,
+        commitHash: commitHash ?? null,
+      });
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch(
+        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
+          "/builds/triggers/" + encodeURIComponent(triggerUuid) + "/builds",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer " + connection.accessToken,
+            accept: "application/json",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(commitHash ? { commit_hash: commitHash } : { branch }),
+        },
+      );
+      if (!response.ok) throw new Error("Cloudflare build trigger failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: { build_uuid?: string; status?: string; preview_url?: string };
+      };
+      if (body.success === false) throw new Error("Cloudflare build trigger failed.");
+      return result({
+        provider: "cloudflare",
+        buildUuid: body.result?.build_uuid ?? null,
+        status: body.result?.status ?? null,
+        previewUrl: body.result?.preview_url ?? null,
+      });
+    },
+  );
+
+  registerTool(
     "supabase_connection_status",
     {
       title: "Supabase Connection",
@@ -977,6 +1104,99 @@ function createServer(tenant: TenantContext, env: Env) {
           organizationId: project.organization_id ?? null,
         })),
       });
+    },
+  );
+
+  registerTool(
+    "supabase_execute_sql_readonly",
+    {
+      title: "Run Supabase Read-only SQL",
+      description: "Execute a read-only SQL query against a connected Supabase project through the Management API.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        projectRef: z.string().regex(/^[a-z0-9]{20}$/),
+        query: z.string().min(1).max(100000),
+        parameters: z.array(z.unknown()).max(100).optional(),
+      },
+    },
+    async ({ projectRef, query, parameters }: { projectRef: string; query: string; parameters?: unknown[] }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const response = await fetch(
+        "https://api.supabase.com/v1/projects/" + encodeURIComponent(projectRef) + "/database/query",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer " + connection.accessToken,
+            accept: "application/json",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ query, parameters: parameters ?? [], read_only: true }),
+        },
+      );
+      if (!response.ok) throw new Error("Supabase read-only SQL failed (" + response.status + ").");
+      return result({ provider: "supabase", projectRef, rows: await response.json() });
+    },
+  );
+
+  registerTool(
+    "supabase_apply_migration",
+    {
+      title: "Apply Supabase Migration",
+      description: "Apply a named SQL migration to a connected Supabase project after explicit confirmation. Do not include credentials or secrets in SQL.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: {
+        projectRef: z.string().regex(/^[a-z0-9]{20}$/),
+        name: z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/),
+        query: z.string().min(1).max(200000),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ projectRef, name, query, confirm }: { projectRef: string; name: string; query: string; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({
+        requiresConfirmation: true,
+        action: "supabase_apply_migration",
+        projectRef,
+        name,
+        queryLength: query.length,
+      });
+      const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const response = await fetch(
+        "https://api.supabase.com/v1/projects/" + encodeURIComponent(projectRef) + "/database/migrations",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer " + connection.accessToken,
+            accept: "application/json",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ name, query }),
+        },
+      );
+      if (!response.ok) throw new Error("Supabase migration failed (" + response.status + ").");
+      return result({ provider: "supabase", projectRef, name, applied: true });
+    },
+  );
+
+  registerTool(
+    "supabase_list_migrations",
+    {
+      title: "List Supabase Migrations",
+      description: "List applied migration versions for a connected Supabase project.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { projectRef: z.string().regex(/^[a-z0-9]{20}$/) },
+    },
+    async ({ projectRef }: { projectRef: string }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const response = await fetch(
+        "https://api.supabase.com/v1/projects/" + encodeURIComponent(projectRef) + "/database/migrations",
+        { headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" } },
+      );
+      if (!response.ok) throw new Error("Supabase migration listing failed (" + response.status + ").");
+      return result({ provider: "supabase", projectRef, migrations: await response.json() });
     },
   );
 
