@@ -34,25 +34,29 @@ type Env = {
   SUPABASE_OAUTH_CLIENT_ID?: string;
   SUPABASE_OAUTH_CLIENT_SECRET?: string;
   OPENAI_APPS_CHALLENGE?: string;
+  SELF_HOSTED_BROWSER_URL?: string;
+  SELF_HOSTED_BROWSER_TOKEN?: string;
 };
 
 export class TenantBrowserSession extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/session") {
-      const body = await request.json() as { sessionId?: string; allowedDomains?: string[] };
+      const body = await request.json() as { sessionId?: string; allowedDomains?: string[]; backend?: "cloudflare" | "selfhosted" };
       if (!body.sessionId || !body.allowedDomains?.length) return new Response("invalid_session", { status: 400 });
       await this.ctx.storage.put("sessionId", body.sessionId);
       await this.ctx.storage.put("allowedDomains", body.allowedDomains);
+      await this.ctx.storage.put("backend", body.backend ?? "cloudflare");
       return Response.json({ ok: true });
     }
     if (request.method === "GET" && url.pathname === "/session") {
       const sessionId = await this.ctx.storage.get<string>("sessionId");
       const allowedDomains = await this.ctx.storage.get<string[]>("allowedDomains");
-      return sessionId ? Response.json({ sessionId, allowedDomains: allowedDomains ?? [] }) : new Response("session_not_found", { status: 404 });
+      const backend = await this.ctx.storage.get<"cloudflare" | "selfhosted">("backend");
+      return sessionId ? Response.json({ sessionId, allowedDomains: allowedDomains ?? [], backend: backend ?? "cloudflare" }) : new Response("session_not_found", { status: 404 });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
-      await this.ctx.storage.delete(["sessionId", "allowedDomains"]);
+      await this.ctx.storage.delete(["sessionId", "allowedDomains", "backend"]);
       return Response.json({ ok: true });
     }
     return new Response("not_found", { status: 404 });
@@ -547,30 +551,110 @@ async function providerOAuthCallback(request: Request, env: Env, provider: Provi
   }
 }
 
-type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
+type BrowserBackendKind = "cloudflare" | "selfhosted";
+type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[]; backend: BrowserBackendKind };
+
+function selfHostedBrowserConfigured(env: Env): boolean {
+  return Boolean(env.SELF_HOSTED_BROWSER_URL && env.SELF_HOSTED_BROWSER_TOKEN);
+}
+
+function selfHostedBrowserOrigin(env: Env): string | null {
+  if (!env.SELF_HOSTED_BROWSER_URL) return null;
+  try {
+    const url = new URL(env.SELF_HOSTED_BROWSER_URL);
+    return url.protocol === "https:" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+async function runnerFetch(env: Env, path: string, init: RequestInit = {}): Promise<Response> {
+  if (!selfHostedBrowserConfigured(env)) throw new Error("Self-hosted browser runner is not configured.");
+  const base = new URL(env.SELF_HOSTED_BROWSER_URL as string);
+  if (base.protocol !== "https:") throw new Error("Self-hosted browser runner must use HTTPS.");
+  const url = new URL(path, base.origin);
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${env.SELF_HOSTED_BROWSER_TOKEN}`);
+  if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  return fetch(url, { ...init, headers });
+}
+
+async function runnerJson<T>(env: Env, path: string, init: RequestInit = {}): Promise<T> {
+  const response = await runnerFetch(env, path, init);
+  if (!response.ok) {
+    let reason = "";
+    try {
+      const body = await response.json() as { error?: string };
+      reason = body.error ? `: ${body.error}` : "";
+    } catch {}
+    throw new Error(`Self-hosted browser runner request failed (${response.status})${reason}.`);
+  }
+  return response.json() as Promise<T>;
+}
 
 async function tenantBrowserPolicy(env: Env, tenant: TenantContext): Promise<TenantBrowserPolicy> {
   const id = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
   const response = await env.BROWSER_SESSIONS.get(id).fetch("https://browser-session/session");
   if (!response.ok) throw new Error("No active browser session for this tenant.");
-  const body = await response.json() as { sessionId?: string; allowedDomains?: string[] };
+  const body = await response.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
   if (!body.sessionId || !body.allowedDomains?.length) throw new Error("Tenant browser session is invalid.");
-  return { sessionId: body.sessionId, allowedDomains: body.allowedDomains };
+  return { sessionId: body.sessionId, allowedDomains: body.allowedDomains, backend: body.backend ?? "cloudflare" };
 }
 
 async function tenantSessionId(env: Env, tenant: TenantContext): Promise<string> {
   return (await tenantBrowserPolicy(env, tenant)).sessionId;
 }
 
+async function browserSessionAlive(env: Env, policy: TenantBrowserPolicy): Promise<boolean> {
+  try {
+    if (policy.backend === "selfhosted") {
+      const response = await runnerFetch(env, `/v1/sessions/${encodeURIComponent(policy.sessionId)}`);
+      return response.ok;
+    }
+    if (!env.BROWSER) return false;
+    return Boolean(await (env.BROWSER as any).getSession(policy.sessionId));
+  } catch {
+    return false;
+  }
+}
+
+async function closeBackendSession(env: Env, policy: TenantBrowserPolicy): Promise<void> {
+  if (policy.backend === "selfhosted") {
+    try {
+      await runnerFetch(env, `/v1/sessions/${encodeURIComponent(policy.sessionId)}`, { method: "DELETE" });
+    } catch {}
+    return;
+  }
+  if (!env.BROWSER) return;
+  try {
+    await (env.BROWSER as any).closeSession(policy.sessionId);
+  } catch {}
+}
+
+async function runnerAction<T>(env: Env, policy: TenantBrowserPolicy, action: string, payload: Record<string, unknown> = {}): Promise<T> {
+  return runnerJson<T>(env, `/v1/sessions/${encodeURIComponent(policy.sessionId)}/actions`, {
+    method: "POST",
+    body: JSON.stringify({ action, ...payload }),
+  });
+}
+
 async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
   const target = new URL(url);
   if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("Unsupported URL scheme.");
   if (target.username || target.password) throw new Error("Credentials in navigation URLs are not allowed.");
-  if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
   const policy = await tenantBrowserPolicy(env, tenant);
   if (!hostnameAllowed(target.hostname, policy.allowedDomains)) {
     throw new Error("Destination hostname is outside this tenant browser session policy.");
   }
+  if (policy.backend === "selfhosted") {
+    const response = await runnerJson<{ tab?: unknown }>(
+      env,
+      `/v1/sessions/${encodeURIComponent(policy.sessionId)}/tabs`,
+      { method: "POST", body: JSON.stringify({ url: target.toString() }) },
+    );
+    return safeTab(response.tab);
+  }
+  if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
   const browserRun = env.BROWSER as any;
   const tab = await browserRun.devtools.newTarget(
     policy.sessionId,
@@ -581,9 +665,10 @@ async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
 }
 
 async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: string) {
+  const policy = await tenantBrowserPolicy(env, tenant);
+  if (policy.backend !== "cloudflare") throw new Error("Cloud browser page connection requested for a self-hosted session.");
   if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-  const sessionId = await tenantSessionId(env, tenant);
-  const browser = await puppeteer.connect(env.BROWSER as any, sessionId);
+  const browser = await puppeteer.connect(env.BROWSER as any, policy.sessionId);
   const pages = await browser.pages();
   let page = pages.find((candidate: any) => targetId && String((candidate.target() as any)._targetId ?? "") === targetId);
   if (!page && !targetId) page = pages.find((candidate: any) => candidate.url() !== "about:blank") ?? pages[0];
