@@ -1,5 +1,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { chromium } from "playwright";
 
 const HOST = process.env.RUNNER_HOST || "127.0.0.1";
@@ -10,6 +12,8 @@ const CHROME_PATH = String(process.env.CHROME_PATH || "").trim();
 const HEADLESS = String(process.env.HEADLESS || "true").toLowerCase() !== "false";
 const MAX_SESSIONS = Math.max(1, Math.min(64, Number(process.env.MAX_SESSIONS || 8)));
 const SESSION_IDLE_MS = Math.max(0, Number(process.env.SESSION_IDLE_MS || 1_800_000));
+const PROFILE_DIR = path.resolve(String(process.env.BROWSER_PROFILE_DIR || path.join(process.cwd(), ".browser-profiles")));
+const SECRET_PREFIX = "BROWSER_SECRET_";
 
 if (RUNNER_TOKEN.length < 32) {
   throw new Error("RUNNER_TOKEN must be at least 32 characters.");
@@ -40,6 +44,39 @@ function hostnameAllowed(hostname, patterns) {
       ? host.endsWith(pattern.slice(1)) && host !== pattern.slice(2)
       : host === pattern
   );
+}
+
+function validProfileName(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
+}
+
+function ensureProfileDir() {
+  fs.mkdirSync(PROFILE_DIR, { recursive: true, mode: 0o700 });
+}
+
+function browserProfilePath(profileName) {
+  if (!validProfileName(profileName)) {
+    throw Object.assign(new Error("invalid_profile_name"), { statusCode: 400 });
+  }
+  ensureProfileDir();
+  return path.join(PROFILE_DIR, profileName + ".json");
+}
+
+function availableSecretNames() {
+  return Object.keys(process.env)
+    .filter((key) => key.startsWith(SECRET_PREFIX) && String(process.env[key] || "").length > 0)
+    .map((key) => key.slice(SECRET_PREFIX.length).toLowerCase())
+    .sort();
+}
+
+function runnerSecret(secretName) {
+  const normalized = String(secretName || "").trim().toUpperCase();
+  if (!/^[A-Z0-9_]{1,80}$/.test(normalized)) {
+    throw Object.assign(new Error("invalid_secret_name"), { statusCode: 400 });
+  }
+  const value = process.env[SECRET_PREFIX + normalized];
+  if (!value) throw Object.assign(new Error("secret_not_found"), { statusCode: 404 });
+  return String(value);
 }
 
 function safeEqualToken(value) {
@@ -143,10 +180,23 @@ function findPage(session, targetId) {
   throw Object.assign(new Error("page_not_found"), { statusCode: 404 });
 }
 
+async function saveSessionProfile(session) {
+  if (!session.profileName) throw Object.assign(new Error("session_has_no_profile"), { statusCode: 400 });
+  const outputPath = browserProfilePath(session.profileName);
+  await session.context.storageState({ path: outputPath });
+  try { fs.chmodSync(outputPath, 0o600); } catch {}
+  return outputPath;
+}
+
 async function closeSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return false;
   sessions.delete(sessionId);
+  if (session.profileName) {
+    try { await saveSessionProfile(session); } catch (error) {
+      console.error("Failed to save browser profile before close:", error?.message || error);
+    }
+  }
   try { await session.context.close(); } catch {}
   for (const [token, view] of viewTokens) {
     if (view.sessionId === sessionId) viewTokens.delete(token);
@@ -154,7 +204,7 @@ async function closeSession(sessionId) {
   return true;
 }
 
-async function createSession(allowedDomains) {
+async function createSession(allowedDomains, profileName = null) {
   const normalized = [...new Set((allowedDomains || []).map((x) => String(x).trim().toLowerCase()))].sort();
   if (!normalized.length || normalized.length > 50 || normalized.some((x) => !validDomainPattern(x))) {
     throw Object.assign(new Error("invalid_allowed_domains"), { statusCode: 400 });
@@ -164,9 +214,16 @@ async function createSession(allowedDomains) {
   }
 
   const browser = await getBrowser();
+  const normalizedProfile = profileName == null || profileName === "" ? null : String(profileName).trim().toLowerCase();
+  if (normalizedProfile && !validProfileName(normalizedProfile)) {
+    throw Object.assign(new Error("invalid_profile_name"), { statusCode: 400 });
+  }
+  const storageStatePath = normalizedProfile ? browserProfilePath(normalizedProfile) : null;
+  const profileLoaded = Boolean(storageStatePath && fs.existsSync(storageStatePath));
   const context = await browser.newContext({
     serviceWorkers: "block",
     viewport: { width: 1440, height: 1000 },
+    storageState: profileLoaded ? storageStatePath : undefined,
   });
 
   await context.route("**/*", async (route) => {
@@ -186,6 +243,8 @@ async function createSession(allowedDomains) {
     allowedDomains: normalized,
     pages: new Map(),
     activeTargetId: null,
+    profileName: normalizedProfile,
+    profileLoaded,
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
   });
@@ -242,6 +301,15 @@ async function performAction(session, body) {
     return { targetId: found.targetId, closed: true };
   }
 
+  if (action === "saveProfile") {
+    await saveSessionProfile(session);
+    return { saved: true, profileName: session.profileName };
+  }
+
+  if (action === "vaultNames") {
+    return { names: availableSecretNames() };
+  }
+
   return withPage(session, targetId, async (page, resolvedTargetId) => {
     if (action === "screenshot") {
       const png = await page.screenshot({ type: "png" });
@@ -277,6 +345,32 @@ async function performAction(session, body) {
       if (body.clearFirst) await locator.fill("");
       await locator.type(value);
       return { ...(await pageMetadata(page, resolvedTargetId)), typed: true, characters: value.length };
+    }
+    if (action === "fillSecret") {
+      const selector = String(body.selector || "");
+      const secretName = String(body.secretName || "");
+      if (!selector) throw Object.assign(new Error("selector_required"), { statusCode: 400 });
+      const secret = runnerSecret(secretName);
+      const locator = page.locator(selector).first();
+      await locator.fill(secret);
+      return { ...(await pageMetadata(page, resolvedTargetId)), filled: true, secretName: secretName.toLowerCase() };
+    }
+    if (action === "uploadFiles") {
+      const selector = String(body.selector || "");
+      const files = Array.isArray(body.files) ? body.files.slice(0, 8) : [];
+      if (!selector || !files.length) throw Object.assign(new Error("selector_and_files_required"), { statusCode: 400 });
+      const payloads = files.map((file) => {
+        const name = String(file?.name || "").replace(/[\\/]/g, "_").slice(0, 180);
+        const mimeType = String(file?.mimeType || "application/octet-stream").slice(0, 120);
+        const dataBase64 = String(file?.dataBase64 || "");
+        if (!name || !/^[A-Za-z0-9._() -]+$/.test(name)) throw Object.assign(new Error("invalid_upload_name"), { statusCode: 400 });
+        if (!/^[A-Za-z0-9+/=]*$/.test(dataBase64)) throw Object.assign(new Error("invalid_upload_data"), { statusCode: 400 });
+        const buffer = Buffer.from(dataBase64, "base64");
+        if (!buffer.length || buffer.length > 5 * 1024 * 1024) throw Object.assign(new Error("upload_size_invalid"), { statusCode: 400 });
+        return { name, mimeType, buffer };
+      });
+      await page.locator(selector).first().setInputFiles(payloads);
+      return { ...(await pageMetadata(page, resolvedTargetId)), uploaded: true, files: payloads.map((file) => ({ name: file.name, size: file.buffer.length })) };
     }
     if (action === "select") {
       const selector = String(body.selector || "");
@@ -376,11 +470,13 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/v1/sessions") {
     const body = await readJson(req);
-    const session = await createSession(body.allowedDomains);
+    const session = await createSession(body.allowedDomains, body.profileName);
     return json(res, 201, {
       sessionId: session.sessionId,
       allowedDomains: session.allowedDomains,
       backend: "selfhosted",
+      profileName: session.profileName,
+      profileLoaded: session.profileLoaded,
     });
   }
 
@@ -397,6 +493,8 @@ async function handleApi(req, res, url) {
       createdAt: session.createdAt,
       lastUsedAt: session.lastUsedAt,
       tabs: session.pages.size,
+      profileName: session.profileName,
+      profileLoaded: session.profileLoaded,
     });
   }
 
