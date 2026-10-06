@@ -3,7 +3,14 @@ name: Self-hosted browser branch CI
 on:
   push:
     branches:
+      - main
       - feature/self-hosted-browser-runner
+    paths:
+      - "src/**"
+      - "runner/**"
+      - "package.json"
+      - "tests/**"
+      - ".github/workflows/self-hosted-browser-ci.yml"
   pull_request:
     branches:
       - main
