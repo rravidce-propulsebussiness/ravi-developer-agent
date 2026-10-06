@@ -2016,8 +2016,16 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
       };
       const limited = await enforceTenantRateLimit(env, tenant.tenantId);
       if (limited) return limited;
-      const mcp = createMcpHandler(() => createServer(tenant, env), { route: "/mcp" });
-      return mcp(request, env, ctx);
+      const mcp = createMcpHandler(() => createServer(tenant, env), {
+        route: "/mcp",
+        onerror(error) {
+          console.error("MCP handler error:", error.name, error.message, error.stack ?? "");
+        },
+      });
+      // OAuthResourceServer has already authenticated the request. Its context is
+      // not a Worker ExecutionContext, so use the stateless handler's middleware
+      // fetch API rather than invoking the Worker-callable form with OAuth ctx.
+      return mcp.fetch(request);
     },
   },
 });
