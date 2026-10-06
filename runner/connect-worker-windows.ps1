@@ -21,19 +21,19 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $repoRoot
 try {
   Write-Host "Checking Cloudflare CLI login..."
-  & npx wrangler whoami *> $null
+  & npx.cmd wrangler whoami *> $null
   if ($LASTEXITCODE -ne 0) {
     Write-Host "Cloudflare authorization is required. A browser window will open."
-    & npx wrangler login
+    & npx.cmd wrangler login
     if ($LASTEXITCODE -ne 0) { throw "Cloudflare login failed." }
   }
 
   Write-Host "Updating Worker runner URL..."
-  $url | & npx wrangler secret put SELF_HOSTED_BROWSER_URL --name ravi-developer-agent
+  $url | & npx.cmd wrangler secret put SELF_HOSTED_BROWSER_URL --name ravi-developer-agent
   if ($LASTEXITCODE -ne 0) { throw "Failed to set SELF_HOSTED_BROWSER_URL." }
 
   Write-Host "Updating Worker runner token securely..."
-  $token | & npx wrangler secret put SELF_HOSTED_BROWSER_TOKEN --name ravi-developer-agent
+  $token | & npx.cmd wrangler secret put SELF_HOSTED_BROWSER_TOKEN --name ravi-developer-agent
   if ($LASTEXITCODE -ne 0) { throw "Failed to set SELF_HOSTED_BROWSER_TOKEN." }
 
   Write-Host ""
