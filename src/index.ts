@@ -204,11 +204,12 @@ function createServer(tenant: TenantContext) {
     description: "Open a public web URL in a new tab of an existing tenant browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
-    inputSchema: { sessionId: z.string().uuid(), url: z.string().url() },
-  }, async ({ sessionId, url }) => {
+    inputSchema: { url: z.string().url() },
+  }, async ({ url }) => {
     const target = new URL(url);
     if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("Unsupported URL scheme.");
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const sessionId = await tenantSessionId(env, tenant);
     const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/json/new?url=" + encodeURIComponent(target.toString()) + "&liveViewUrlExpiresInMs=300000";
     const response = await env.BROWSER.fetch(endpoint, { method: "PUT" });
     if (!response.ok) throw new Error("Browser tab open failed.");
