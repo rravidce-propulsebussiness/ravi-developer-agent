@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Ravi Developer Agent logo">
+  <rect width="512" height="512" rx="96" fill="#1D4ED8"/>
+  <circle cx="256" cy="256" r="158" fill="#0F172A"/>
+  <path d="M201 174 119 256l82 82" fill="none" stroke="#FFFFFF" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m311 174 82 82-82 82" fill="none" stroke="#FFFFFF" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m285 142-58 228" fill="none" stroke="#38BDF8" stroke-width="30" stroke-linecap="round"/>
+</svg>
