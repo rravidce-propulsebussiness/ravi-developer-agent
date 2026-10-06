@@ -651,7 +651,14 @@ function createServer(tenant: TenantContext, env: Env) {
       }
       return output;
     };
-    return (registerAppTool as any)(server, name, normalizedConfig, wrapped);
+    const hasAppUi = Boolean(
+      normalizedConfig?._meta?.ui?.resourceUri ||
+      normalizedConfig?._meta?.["ui/resourceUri"]
+    );
+    if (hasAppUi) {
+      return (registerAppTool as any)(server, name, normalizedConfig, wrapped);
+    }
+    return (server.registerTool as any)(name, normalizedConfig, wrapped);
   };
 
   registerTool(
