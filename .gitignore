@@ -4,3 +4,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+
+# Local authenticated browser storage. Never commit.
+.browser-profiles/
+runner/.browser-profiles/
