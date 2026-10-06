@@ -38,7 +38,7 @@ GitHub provider tokens are kept inside OAuth token properties and are not emitte
 
 - Per-user Management API OAuth connection with PKCE.
 - List projects and inspect project lifecycle status.
-- Execute Management API SQL in read-only mode.
+- Inspect database schema metadata without returning application table rows.
 - Apply a named migration only after explicit confirmation.
 - List applied migrations.
 
