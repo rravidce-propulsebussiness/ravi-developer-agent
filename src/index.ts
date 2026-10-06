@@ -128,6 +128,22 @@ function createServer(tenant: TenantContext) {
       return result({ tenant: tenant.tenantId, url: target.toString(), snapshot: body.slice(0, 50000) });
     },
   );
+  server.registerTool(
+    "browser_session_start",
+    {
+      title: "Start Browser Session",
+      description: "Start an isolated persistent cloud browser session and return its current targets for live browser viewing.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => {
+      if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+      const response = await env.BROWSER.fetch("https://browser-rendering/devtools/browser?keep_alive=1200000&targets=true&liveViewUrlExpiresInMs=300000", { method: "POST" });
+      if (!response.ok) throw new Error(`Browser session start failed (${response.status}).`);
+      const session = await response.json();
+      return result({ tenant: tenant.tenantId, session });
+    },
+  );
   return server;
 }
 
