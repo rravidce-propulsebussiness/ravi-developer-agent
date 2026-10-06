@@ -183,6 +183,305 @@ function decodeUtf8Base64(value: string): string {
   return new TextDecoder().decode(bytes);
 }
 
+
+type ProviderConnection = {
+  accessToken: string;
+  refreshToken?: string;
+  tokenType?: string;
+  scope?: string;
+  expiresAt?: number;
+};
+
+const MAIN_ORIGIN = "https://ravi-developer-agent.rvrmvth.workers.dev";
+const CLOUDFLARE_CALLBACK = MAIN_ORIGIN + "/oauth/cloudflare/callback";
+const SUPABASE_CALLBACK = MAIN_ORIGIN + "/oauth/supabase/callback";
+
+function randomBase64Url(bytesLength = 32): string {
+  const bytes = new Uint8Array(bytesLength);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function pkceChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  let binary = "";
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function connectionKeyBytes(env: Env): Uint8Array {
+  const value = env.CONNECTION_ENCRYPTION_KEY?.trim();
+  if (!value) throw new Error("Provider connection encryption is not configured.");
+  let bytes: Uint8Array;
+  if (/^[0-9a-f]{64}$/i.test(value)) {
+    bytes = Uint8Array.from(value.match(/.{2}/g)!.map((pair) => parseInt(pair, 16)));
+  } else {
+    try {
+      const binary = atob(value);
+      bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    } catch {
+      throw new Error("Provider connection encryption key is invalid.");
+    }
+  }
+  if (bytes.length !== 32) throw new Error("Provider connection encryption key must be 32 bytes.");
+  return bytes;
+}
+
+async function connectionCryptoKey(env: Env): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", connectionKeyBytes(env), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function encryptConnection(env: Env, tenantId: string, provider: ProviderName, value: ProviderConnection): Promise<EncryptedConnection> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const aad = new TextEncoder().encode(tenantId + ":" + provider);
+  const plaintext = new TextEncoder().encode(JSON.stringify(value));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: aad },
+    await connectionCryptoKey(env),
+    plaintext,
+  );
+  return {
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    updatedAt: Date.now(),
+  };
+}
+
+async function decryptConnection(env: Env, tenantId: string, provider: ProviderName, value: EncryptedConnection): Promise<ProviderConnection> {
+  const aad = new TextEncoder().encode(tenantId + ":" + provider);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToBytes(value.iv), additionalData: aad },
+    await connectionCryptoKey(env),
+    base64ToBytes(value.ciphertext),
+  );
+  return JSON.parse(new TextDecoder().decode(plaintext)) as ProviderConnection;
+}
+
+function providerStore(env: Env, tenantId: string) {
+  return env.PROVIDER_CONNECTIONS.get(env.PROVIDER_CONNECTIONS.idFromName(tenantId));
+}
+
+async function saveProviderConnection(env: Env, tenantId: string, provider: ProviderName, connection: ProviderConnection): Promise<void> {
+  const encrypted = await encryptConnection(env, tenantId, provider, connection);
+  const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(encrypted),
+  });
+  if (!response.ok) throw new Error("Provider connection could not be stored.");
+}
+
+async function providerConnectionExists(env: Env, tenantId: string, provider: ProviderName): Promise<boolean> {
+  const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider);
+  return response.ok;
+}
+
+async function loadProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<ProviderConnection> {
+  const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider);
+  if (!response.ok) throw new Error(provider + " is not connected.");
+  return decryptConnection(env, tenantId, provider, await response.json() as EncryptedConnection);
+}
+
+async function deleteProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<void> {
+  await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider, { method: "DELETE" });
+}
+
+function providerClient(env: Env, provider: ProviderName): { clientId: string; clientSecret: string; callback: string } {
+  if (provider === "cloudflare") {
+    if (!env.CLOUDFLARE_OAUTH_CLIENT_ID || !env.CLOUDFLARE_OAUTH_CLIENT_SECRET) throw new Error("Cloudflare OAuth application is not configured.");
+    return { clientId: env.CLOUDFLARE_OAUTH_CLIENT_ID, clientSecret: env.CLOUDFLARE_OAUTH_CLIENT_SECRET, callback: CLOUDFLARE_CALLBACK };
+  }
+  if (!env.SUPABASE_OAUTH_CLIENT_ID || !env.SUPABASE_OAUTH_CLIENT_SECRET) throw new Error("Supabase OAuth application is not configured.");
+  return { clientId: env.SUPABASE_OAUTH_CLIENT_ID, clientSecret: env.SUPABASE_OAUTH_CLIENT_SECRET, callback: SUPABASE_CALLBACK };
+}
+
+function providerConfigured(env: Env, provider: ProviderName): boolean {
+  try {
+    connectionKeyBytes(env);
+    providerClient(env, provider);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function beginProviderOAuth(env: Env, tenant: TenantContext, provider: ProviderName): Promise<string> {
+  const client = providerClient(env, provider);
+  connectionKeyBytes(env);
+  const state = randomBase64Url(32);
+  const verifier = randomBase64Url(48);
+  const stateId = env.OAUTH_CONNECT_STATE.idFromName(state);
+  const stored = await env.OAUTH_CONNECT_STATE.get(stateId).fetch("https://oauth-connect/state", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tenantId: tenant.tenantId, provider, verifier, createdAt: Date.now() } satisfies OAuthConnectStateRecord),
+  });
+  if (!stored.ok) throw new Error("Provider authorization state could not be stored.");
+
+  const challenge = await pkceChallenge(verifier);
+  if (provider === "cloudflare") {
+    const url = new URL("https://dash.cloudflare.com/oauth2/auth");
+    url.searchParams.set("client_id", client.clientId);
+    url.searchParams.set("redirect_uri", client.callback);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("state", state);
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("scope", "offline_access workers-platform.read workers-platform.write");
+    return url.toString();
+  }
+
+  const url = new URL("https://api.supabase.com/v1/oauth/authorize");
+  url.searchParams.set("client_id", client.clientId);
+  url.searchParams.set("redirect_uri", client.callback);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("state", state);
+  url.searchParams.set("code_challenge", challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  return url.toString();
+}
+
+async function consumeProviderState(env: Env, state: string, provider: ProviderName): Promise<OAuthConnectStateRecord> {
+  if (!/^[A-Za-z0-9_-]{20,200}$/.test(state)) throw new Error("Invalid OAuth state.");
+  const id = env.OAUTH_CONNECT_STATE.idFromName(state);
+  const response = await env.OAUTH_CONNECT_STATE.get(id).fetch("https://oauth-connect/consume", { method: "POST" });
+  if (!response.ok) throw new Error("Provider authorization state is invalid or expired.");
+  const record = await response.json() as OAuthConnectStateRecord;
+  if (record.provider !== provider) throw new Error("Provider authorization state does not match.");
+  return record;
+}
+
+function basicAuth(clientId: string, clientSecret: string): string {
+  return "Basic " + btoa(clientId + ":" + clientSecret);
+}
+
+async function exchangeProviderCode(env: Env, provider: ProviderName, code: string, verifier: string): Promise<ProviderConnection> {
+  const client = providerClient(env, provider);
+  const tokenUrl = provider === "cloudflare"
+    ? "https://dash.cloudflare.com/oauth2/token"
+    : "https://api.supabase.com/v1/oauth/token";
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: basicAuth(client.clientId, client.clientSecret),
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: client.callback,
+      code_verifier: verifier,
+    }),
+  });
+  if (!response.ok) throw new Error("Provider token exchange failed (" + response.status + ").");
+  const token = await response.json() as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    token_type?: string;
+    scope?: string;
+  };
+  if (!token.access_token) throw new Error("Provider did not return an access token.");
+  return {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token,
+    tokenType: token.token_type,
+    scope: token.scope,
+    expiresAt: token.expires_in ? Date.now() + token.expires_in * 1000 : undefined,
+  };
+}
+
+async function refreshProviderConnection(env: Env, tenantId: string, provider: ProviderName, connection: ProviderConnection): Promise<ProviderConnection> {
+  if (!connection.refreshToken || !connection.expiresAt || connection.expiresAt > Date.now() + 60_000) return connection;
+  const client = providerClient(env, provider);
+  const tokenUrl = provider === "cloudflare"
+    ? "https://dash.cloudflare.com/oauth2/token"
+    : "https://api.supabase.com/v1/oauth/token";
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: basicAuth(client.clientId, client.clientSecret),
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: connection.refreshToken,
+    }),
+  });
+  if (!response.ok) throw new Error(provider + " authorization has expired; reconnect the provider.");
+  const token = await response.json() as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    token_type?: string;
+    scope?: string;
+  };
+  if (!token.access_token) throw new Error(provider + " token refresh failed.");
+  const refreshed: ProviderConnection = {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token ?? connection.refreshToken,
+    tokenType: token.token_type ?? connection.tokenType,
+    scope: token.scope ?? connection.scope,
+    expiresAt: token.expires_in ? Date.now() + token.expires_in * 1000 : connection.expiresAt,
+  };
+  await saveProviderConnection(env, tenantId, provider, refreshed);
+  return refreshed;
+}
+
+async function activeProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<ProviderConnection> {
+  return refreshProviderConnection(env, tenantId, provider, await loadProviderConnection(env, tenantId, provider));
+}
+
+function providerConnectedPage(provider: ProviderName, ok: boolean, message: string): Response {
+  const title = ok ? provider + " connected" : provider + " connection failed";
+  const safeMessage = message.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+  const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title><style>body{font-family:system-ui;background:#101216;color:#f4f6fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:520px;padding:28px;border:1px solid #2b3140;border-radius:18px;background:#181b22}h1{margin-top:0}</style>
+<div class="card"><h1>${ok ? "Connected" : "Connection failed"}</h1><p>${safeMessage}</p><p>You can close this tab and return to ChatGPT.</p></div>`;
+  return new Response(html, {
+    status: ok ? 200 : 400,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
+async function providerOAuthCallback(request: Request, env: Env, provider: ProviderName): Promise<Response> {
+  const url = new URL(request.url);
+  const state = url.searchParams.get("state") ?? "";
+  try {
+    const record = await consumeProviderState(env, state, provider);
+    const error = url.searchParams.get("error");
+    if (error) return providerConnectedPage(provider, false, "Authorization was not completed.");
+    const code = url.searchParams.get("code");
+    if (!code) return providerConnectedPage(provider, false, "Authorization code is missing.");
+    const connection = await exchangeProviderCode(env, provider, code, record.verifier);
+    await saveProviderConnection(env, record.tenantId, provider, connection);
+    return providerConnectedPage(provider, true, provider === "cloudflare" ? "Cloudflare is connected to Ravi Developer Agent." : "Supabase is connected to Ravi Developer Agent.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Provider connection failed.";
+    return providerConnectedPage(provider, false, message);
+  }
+}
+
 type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
 
 async function tenantBrowserPolicy(env: Env, tenant: TenantContext): Promise<TenantBrowserPolicy> {
