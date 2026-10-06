@@ -82,8 +82,13 @@ function hostnameAllowed(hostname: string, patterns: string[]): boolean {
 
 function createServer(tenant: TenantContext, env: Env) {
   const server = new McpServer({ name: "ravi-developer-agent", version: "0.2.0" });
+  // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
+  // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
+  // Keep runtime metadata standards-compliant while containing the cast here.
+  const registerTool = (name: string, config: unknown, handler: unknown) =>
+    (registerAppTool as any)(server, name, config, handler);
 
-  registerAppTool(server, 
+  registerTool(
     "agent_status",
     {
       title: "Agent Status",
@@ -102,7 +107,7 @@ function createServer(tenant: TenantContext, env: Env) {
     }),
   );
 
-  registerAppTool(server, 
+  registerTool(
     "project_plan",
     {
       title: "Project Plan",
@@ -130,7 +135,7 @@ function createServer(tenant: TenantContext, env: Env) {
     }),
   );
 
-  registerAppTool(server, 
+  registerTool(
     "browser_capabilities",
     {
       title: "Browser Capabilities",
@@ -156,7 +161,7 @@ function createServer(tenant: TenantContext, env: Env) {
     }),
   );
 
-  registerAppTool(server, 
+  registerTool(
     "browser_open",
     {
       title: "Open Website",
@@ -181,7 +186,7 @@ function createServer(tenant: TenantContext, env: Env) {
       return result({ tenant: tenant.tenantId, url: target.toString(), snapshot: body.slice(0, 50000) });
     },
   );
-  registerAppTool(server, 
+  registerTool(
     "browser_session_start",
     {
       title: "Start Browser Session",
@@ -214,7 +219,7 @@ function createServer(tenant: TenantContext, env: Env) {
       return result({ tenant: tenant.tenantId, browserReady: true });
     },
   );
-  registerAppTool(server, "browser_tabs", {
+  registerTool("browser_tabs", {
     title: "List Browser Tabs",
     description: "List the current pages and live-view metadata in an existing tenant browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
@@ -227,7 +232,7 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
     return result({ tenant: tenant.tenantId, tabs: await response.json() });
   });
-  registerAppTool(server, "browser_tab_open", {
+  registerTool("browser_tab_open", {
     title: "Open Browser Tab",
     description: "Open a public web URL in a new tab of an existing tenant browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
@@ -244,7 +249,7 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!response.ok) throw new Error("Browser tab open failed.");
     return result({ tenant: tenant.tenantId, tab: await response.json() });
   });
-  registerAppTool(server, "browser_page_preview", {
+  registerTool("browser_page_preview", {
     title: "Browser Page Preview",
     description: "Capture a PNG preview of a public web page for display in ChatGPT.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
@@ -268,7 +273,7 @@ function createServer(tenant: TenantContext, env: Env) {
     }],
   }));
 
-  registerAppTool(server, "browser_live_view", {
+  registerTool("browser_live_view", {
     title: "Browser Live View",
     description: "Create a short-lived read-only live view for an existing browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
