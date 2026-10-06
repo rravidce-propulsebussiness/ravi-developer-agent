@@ -9,6 +9,7 @@ const AUTH_ISSUER = "https://ravi-developer-agent-auth.rvrmvth.workers.dev";
 const MCP_RESOURCE = "https://ravi-developer-agent.rvrmvth.workers.dev/mcp";
 const GITHUB_CALLBACK = AUTH_ISSUER + "/callback";
 const GITHUB_MANIFEST_CALLBACK = AUTH_ISSUER + "/setup/github-app/callback";
+const PROVIDER_SETUP_CALLBACK = AUTH_ISSUER + "/setup/providers/callback";
 const GITHUB_APP_OWNER = "rravidce-propulsebussiness";
 const APP_HOME = "https://ravi-developer-agent.rvrmvth.workers.dev";
 
@@ -112,7 +113,7 @@ async function githubManifestPage(env: AuthEnv): Promise<Response> {
     name: "Ravi Developer Agent",
     url: APP_HOME,
     redirect_url: GITHUB_MANIFEST_CALLBACK,
-    callback_urls: [GITHUB_CALLBACK],
+    callback_urls: [GITHUB_CALLBACK, PROVIDER_SETUP_CALLBACK],
     description: "Tenant-isolated developer agent for GitHub, cloud deployment, and browser testing.",
     public: true,
     request_oauth_on_install: true,
@@ -131,6 +132,138 @@ async function githubManifestPage(env: AuthEnv): Promise<Response> {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action https://github.com; base-uri 'none'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
+function parseCookie(request: Request, name: string): string | null {
+  const cookie = request.headers.get("cookie") ?? "";
+  for (const part of cookie.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return decodeURIComponent(rest.join("="));
+  }
+  return null;
+}
+
+async function providerSetupSession(request: Request, env: AuthEnv): Promise<boolean> {
+  const session = parseCookie(request, "rda_setup");
+  if (!session || !/^[A-Za-z0-9_-]{20,200}$/.test(session)) return false;
+  return Boolean(await env.OAUTH_KV.get("setup:session:" + session));
+}
+
+async function beginProviderSetup(env: AuthEnv): Promise<Response> {
+  const client = await githubClient(env);
+  if (!client) return new Response("Create the Ravi Developer Agent GitHub App first.", { status: 503 });
+  const state = randomVerifier();
+  const verifier = randomVerifier();
+  await env.OAUTH_KV.put("setup:oauth:" + state, verifier, { expirationTtl: 600 });
+  const target = new URL("https://github.com/login/oauth/authorize");
+  target.searchParams.set("client_id", client.clientId);
+  target.searchParams.set("redirect_uri", PROVIDER_SETUP_CALLBACK);
+  target.searchParams.set("state", state);
+  target.searchParams.set("code_challenge", await s256(verifier));
+  target.searchParams.set("code_challenge_method", "S256");
+  return Response.redirect(target.toString(), 302);
+}
+
+async function providerSetupCallback(request: Request, env: AuthEnv): Promise<Response> {
+  const client = await githubClient(env);
+  if (!client) return new Response("GitHub App is not configured.", { status: 503 });
+  const url = new URL(request.url);
+  const state = url.searchParams.get("state") ?? "";
+  const code = url.searchParams.get("code") ?? "";
+  if (!state || !code) return new Response("Missing setup authorization parameters.", { status: 400 });
+  const key = "setup:oauth:" + state;
+  const verifier = await env.OAUTH_KV.get(key);
+  await env.OAUTH_KV.delete(key);
+  if (!verifier) return new Response("Setup authorization state is invalid or expired.", { status: 400 });
+
+  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
+      code,
+      redirect_uri: PROVIDER_SETUP_CALLBACK,
+      code_verifier: verifier,
+    }),
+  });
+  if (!tokenResponse.ok) return new Response("GitHub setup sign-in failed.", { status: 502 });
+  const token = await tokenResponse.json() as { access_token?: string };
+  if (!token.access_token) return new Response("GitHub setup sign-in was not authorized.", { status: 401 });
+
+  const userResponse = await fetch("https://api.github.com/user", {
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: "Bearer " + token.access_token,
+      "user-agent": "ravi-developer-agent",
+      "x-github-api-version": "2026-03-10",
+    },
+  });
+  if (!userResponse.ok) return new Response("GitHub owner verification failed.", { status: 502 });
+  const user = await userResponse.json() as { login?: string };
+  if (user.login?.toLowerCase() !== GITHUB_APP_OWNER.toLowerCase()) {
+    return new Response("Only the Ravi Developer Agent publisher can configure provider OAuth clients.", { status: 403 });
+  }
+
+  const session = randomVerifier();
+  await env.OAUTH_KV.put("setup:session:" + session, "publisher", { expirationTtl: 900 });
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: AUTH_ISSUER + "/setup/providers/form",
+      "set-cookie": "rda_setup=" + encodeURIComponent(session) + "; Path=/setup/providers; HttpOnly; Secure; SameSite=Strict; Max-Age=900",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function providerSetupHtml(configured: { cloudflare: boolean; supabase: boolean }): string {
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Provider OAuth setup</title>
+<style>body{font-family:system-ui;background:#0f1115;color:#f5f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{width:min(760px,calc(100% - 40px));padding:28px;border:1px solid #2a3040;border-radius:18px;background:#171a21}label{display:block;margin:14px 0 6px}.pair{display:grid;grid-template-columns:1fr;gap:8px}input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #3a4255;border-radius:9px;background:#0f1115;color:#fff}button{margin-top:20px;padding:11px 18px;border:0;border-radius:10px;font-weight:700}.ok{color:#89e59a}.muted{color:#aeb7c8}code{word-break:break-all}</style>
+<div class="card"><h1>Provider OAuth setup</h1><p class="muted">Credentials are submitted directly to the authorization Worker and are never returned to ChatGPT.</p>
+<p>Cloudflare: <strong class="${configured.cloudflare ? "ok" : ""}">${configured.cloudflare ? "configured" : "not configured"}</strong><br>Supabase: <strong class="${configured.supabase ? "ok" : ""}">${configured.supabase ? "configured" : "not configured"}</strong></p>
+<form method="post">
+<h2>Cloudflare</h2><p class="muted">Redirect URI: <code>https://ravi-developer-agent.rvrmvth.workers.dev/oauth/cloudflare/callback</code></p>
+<label>Client ID</label><input name="cloudflare_client_id" autocomplete="off">
+<label>Client secret</label><input name="cloudflare_client_secret" type="password" autocomplete="new-password">
+<h2>Supabase</h2><p class="muted">Redirect URI: <code>https://ravi-developer-agent.rvrmvth.workers.dev/oauth/supabase/callback</code></p>
+<label>Client ID</label><input name="supabase_client_id" autocomplete="off">
+<label>Client secret</label><input name="supabase_client_secret" type="password" autocomplete="new-password">
+<button type="submit">Save provider credentials</button></form></div>`;
+}
+
+async function providerSetupForm(request: Request, env: AuthEnv): Promise<Response> {
+  if (!await providerSetupSession(request, env)) return Response.redirect(AUTH_ISSUER + "/setup/providers", 302);
+
+  if (request.method === "POST") {
+    const form = await request.formData();
+    for (const provider of ["cloudflare", "supabase"] as const) {
+      const clientId = String(form.get(provider + "_client_id") ?? "").trim();
+      const clientSecret = String(form.get(provider + "_client_secret") ?? "").trim();
+      if ((clientId && !clientSecret) || (!clientId && clientSecret)) {
+        return new Response("Both client ID and client secret are required for " + provider + ".", { status: 400 });
+      }
+      if (clientId && clientSecret) {
+        await Promise.all([
+          env.OAUTH_KV.put("provider:" + provider + ":client_id", clientId),
+          env.OAUTH_KV.put("provider:" + provider + ":client_secret", clientSecret),
+        ]);
+      }
+    }
+  }
+
+  const configured = {
+    cloudflare: Boolean(await env.OAUTH_KV.get("provider:cloudflare:client_id") && await env.OAUTH_KV.get("provider:cloudflare:client_secret")),
+    supabase: Boolean(await env.OAUTH_KV.get("provider:supabase:client_id") && await env.OAUTH_KV.get("provider:supabase:client_secret")),
+  };
+  return new Response(providerSetupHtml(configured), {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
       "x-frame-options": "DENY",
     },
   });
@@ -319,6 +452,9 @@ export class AuthServer extends WorkerEntrypoint<AuthEnv> {
     }
     if (url.pathname === "/setup/github-app") return githubManifestPage(this.env);
     if (url.pathname === "/setup/github-app/callback") return githubManifestCallback(request, this.env);
+    if (url.pathname === "/setup/providers") return beginProviderSetup(this.env);
+    if (url.pathname === "/setup/providers/callback") return providerSetupCallback(request, this.env);
+    if (url.pathname === "/setup/providers/form") return providerSetupForm(request, this.env);
     if (url.pathname === "/authorize") return authorize(request, this.env);
     if (url.pathname === "/callback") return githubCallback(request, this.env);
     return authorizationServer.fetch(request, this.env, this.ctx);
@@ -326,6 +462,14 @@ export class AuthServer extends WorkerEntrypoint<AuthEnv> {
 
   validateToken(resource: string, token: string) {
     return authorizationServer.validateToken(resource, token, this.env);
+  }
+
+  async getProviderClient(provider: "cloudflare" | "supabase") {
+    const [clientId, clientSecret] = await Promise.all([
+      this.env.OAUTH_KV.get("provider:" + provider + ":client_id"),
+      this.env.OAUTH_KV.get("provider:" + provider + ":client_secret"),
+    ]);
+    return clientId && clientSecret ? { clientId, clientSecret } : null;
   }
 }
 
