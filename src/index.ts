@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-type Env = Record<string, never>;
+type Env = {\n  AUTH_SERVER_URL?: string;\n};
 
 type TenantContext = {
   tenantId: string;
@@ -73,6 +73,23 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      const resource = url.origin;
+      const authorizationServer = env.AUTH_SERVER_URL;
+      if (!authorizationServer) {
+        return Response.json(
+          { error: "oauth_not_configured" },
+          { status: 503, headers: { "cache-control": "no-store" } },
+        );
+      }
+      return Response.json({
+        resource,
+        authorization_servers: [authorizationServer],
+        scopes_supported: ["agent:read", "agent:write"],
+        resource_documentation: resource + "/",
+      }, { headers: { "cache-control": "public, max-age=300" } });
+    }
+
     if (url.pathname === "/health") {
       return Response.json({ ok: true, service: "ravi-developer-agent", version: "0.2.0" });
     }
@@ -92,7 +109,13 @@ export default {
       if (!tenant) {
         return Response.json(
           { error: "unauthorized", message: "Authenticated tenant context is required." },
-          { status: 401, headers: { "cache-control": "no-store" } },
+          {
+            status: 401,
+            headers: {
+              "cache-control": "no-store",
+              "WWW-Authenticate": 'Bearer resource_metadata="' + url.origin + '/.well-known/oauth-protected-resource", scope="agent:read"',
+            },
+          },
         );
       }
       const mcp = createMcpHandler(() => createServer(tenant), { route: "/mcp" });
