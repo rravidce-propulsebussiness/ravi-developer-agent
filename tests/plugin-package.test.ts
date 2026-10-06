@@ -7,8 +7,8 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 
 describe("ChatGPT plugin submission package", () => {
   it("keeps release versions aligned", () => {
-    expect(plugin.version).toBe("1.0.1");
-    expect(pkg.version).toBe("1.0.1");
+    expect(plugin.version).toBe("1.0.4");
+    expect(pkg.version).toBe("1.0.4");
   });
 
   it("uses the production Streamable HTTP MCP endpoint", () => {
