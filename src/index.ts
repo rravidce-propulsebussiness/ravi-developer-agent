@@ -13,17 +13,19 @@ export class TenantBrowserSession extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/session") {
-      const body = await request.json() as { sessionId?: string };
-      if (!body.sessionId) return new Response("invalid_session", { status: 400 });
+      const body = await request.json() as { sessionId?: string; allowedDomains?: string[] };
+      if (!body.sessionId || !body.allowedDomains?.length) return new Response("invalid_session", { status: 400 });
       await this.ctx.storage.put("sessionId", body.sessionId);
+      await this.ctx.storage.put("allowedDomains", body.allowedDomains);
       return Response.json({ ok: true });
     }
     if (request.method === "GET" && url.pathname === "/session") {
       const sessionId = await this.ctx.storage.get<string>("sessionId");
-      return sessionId ? Response.json({ sessionId }) : new Response("session_not_found", { status: 404 });
+      const allowedDomains = await this.ctx.storage.get<string[]>("allowedDomains");
+      return sessionId ? Response.json({ sessionId, allowedDomains: allowedDomains ?? [] }) : new Response("session_not_found", { status: 404 });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
-      await this.ctx.storage.delete("sessionId");
+      await this.ctx.storage.delete(["sessionId", "allowedDomains"]);
       return Response.json({ ok: true });
     }
     return new Response("not_found", { status: 404 });
@@ -187,7 +189,7 @@ function createServer(tenant: TenantContext) {
       const stored = await owner.fetch("https://browser-session/session", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({ sessionId, allowedDomains }),
       });
       if (!stored.ok) throw new Error("Browser session ownership could not be stored.");
       return result({ tenant: tenant.tenantId, browserReady: true });
