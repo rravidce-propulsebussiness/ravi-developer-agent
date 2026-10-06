@@ -31,6 +31,7 @@ CHROME_PATH=
 HEADLESS=false
 MAX_SESSIONS=8
 SESSION_IDLE_MS=1800000
+BROWSER_PROFILE_DIR=.browser-profiles
 "@ | Set-Content -Encoding UTF8 ".env"
   Write-Host "Created runner/.env with a random RUNNER_TOKEN."
 } else {
@@ -44,3 +45,6 @@ Write-Host ""
 Write-Host "Self-hosted browser runner is installed."
 Write-Host "Edit PUBLIC_BASE_URL in runner/.env if needed, then run:"
 Write-Host "  .\start-windows.ps1"
+Write-Host ""
+Write-Host "Optional secure browser secret alias:"
+Write-Host "  .\set-browser-secret-windows.ps1 -Name HOSTINGER_PASSWORD"
