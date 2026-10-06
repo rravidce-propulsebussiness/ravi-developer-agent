@@ -235,7 +235,9 @@ function toolAuthRequired(scopes: string[]) {
     isError: true,
     content: [{ type: "text" as const, text: "Additional authorization is required for this action." }],
     _meta: {
-      "mcp/www_authenticate": `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="${scopes.join(" ")}"`,
+      "mcp/www_authenticate": [
+        `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="${scopes.join(" ")}", error="insufficient_scope", error_description="Additional authorization is required for this action"`,
+      ],
     },
   };
 }
@@ -251,8 +253,11 @@ function safeTab(value: unknown) {
 }
 
 function result(data: unknown) {
-  const text = JSON.stringify(data);
-  return { structuredContent: data as Record<string, unknown>, content: [{ type: "text" as const, text }] };
+  const visible = data && typeof data === "object" && !Array.isArray(data)
+    ? Object.fromEntries(Object.entries(data as Record<string, unknown>).filter(([key]) => key !== "tenant"))
+    : data;
+  const text = JSON.stringify(visible);
+  return { structuredContent: visible as Record<string, unknown>, content: [{ type: "text" as const, text }] };
 }
 
 function githubHeaders(tenant: TenantContext): HeadersInit {
@@ -693,18 +698,42 @@ async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: str
 }
 
 function createServer(tenant: TenantContext, env: Env) {
-  const server = new McpServer({ name: "ravi-developer-agent", version: "0.6.0" });
+  const server = new McpServer({ name: "ravi-developer-agent", version: "0.6.1" });
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
+  const openWorldTools = new Set([
+    "github_create_branch",
+    "github_put_file",
+    "github_create_pull_request",
+    "cloudflare_trigger_build",
+    "browser_open",
+    "browser_tab_open",
+    "browser_screenshot",
+    "browser_page_text",
+    "browser_click",
+    "browser_type",
+    "browser_select",
+    "browser_press",
+    "browser_wait",
+    "browser_live_control",
+    "browser_live_view",
+  ]);
+  const annotationOverrides: Record<string, Record<string, boolean>> = {
+    browser_open: { readOnlyHint: false, destructiveHint: false },
+    browser_session_start: { readOnlyHint: false, destructiveHint: false },
+    browser_tab_open: { readOnlyHint: false, destructiveHint: false },
+    cloudflare_trigger_build: { readOnlyHint: false, destructiveHint: true },
+  };
   const registerTool = (name: string, config: any, handler: any) => {
     const normalizedConfig = {
       ...config,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
-        openWorldHint: true,
+        openWorldHint: openWorldTools.has(name),
         ...(config?.annotations ?? {}),
+        ...(annotationOverrides[name] ?? {}),
       },
     };
     const wrapped = async (...args: any[]) => {
@@ -753,7 +782,7 @@ function createServer(tenant: TenantContext, env: Env) {
     async () => result({
       ok: true,
       service: "Ravi Developer Agent",
-      version: "0.6.0",
+      version: "0.6.1",
       transport: "MCP Streamable HTTP",
       tenant: tenant.tenantId,
       authentication: "oauth-2.1",
@@ -1794,7 +1823,7 @@ function createServer(tenant: TenantContext, env: Env) {
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return {
-        structuredContent: { tenant: tenant.tenantId, targetId: resolvedTargetId, url: page.url() },
+        structuredContent: { targetId: resolvedTargetId, url: page.url() },
         content: [{ type: "image" as const, data: btoa(binary), mimeType: "image/png" }],
       };
     } finally {
@@ -1991,7 +2020,7 @@ function createServer(tenant: TenantContext, env: Env) {
       uri: "ui://ravi-developer-agent/browser-v1.html",
       mimeType: RESOURCE_MIME_TYPE,
       text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params) });apply(window.openai?.toolResponseMetadata);</script></body></html>`,
-      _meta: { ui: { prefersBorder: false, csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
+      _meta: { ui: { prefersBorder: false, domain: "https://ravi-developer-agent.rvrmvth.workers.dev", csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
     }],
   }));
 
@@ -2015,7 +2044,7 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!response.ok) throw new Error("Interactive browser view creation failed.");
     const liveView = await response.json();
     return {
-      structuredContent: { tenant: tenant.tenantId, browserReady: true, interactive: true },
+      structuredContent: { browserReady: true, interactive: true },
       content: [{ type: "text" as const, text: "Interactive browser control is ready for secure human takeover." }],
       _meta: { liveView },
     };
@@ -2039,7 +2068,7 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!response.ok) throw new Error("Live view creation failed.");
     const liveView = await response.json();
     return {
-      structuredContent: { tenant: tenant.tenantId, browserReady: true },
+      structuredContent: { browserReady: true },
       content: [{ type: "text" as const, text: "Secure read-only browser view is ready." }],
       _meta: { liveView },
     };
@@ -2135,7 +2164,7 @@ export default {
       return Response.json({
         ok: true,
         service: "ravi-developer-agent",
-        version: "0.5.0",
+        version: "0.6.1",
         authentication: "oauth-2.1",
         providerOAuth: {
           storage: "tenant-durable-object-aes-256-at-rest",
@@ -2148,7 +2177,7 @@ export default {
     if (url.pathname === "/") {
       return Response.json({
         name: "Ravi Developer Agent",
-        version: "0.5.0",
+        version: "0.6.1",
         mcp: "/mcp",
         health: "/health",
         authentication: "OAuth 2.1 required for MCP",
