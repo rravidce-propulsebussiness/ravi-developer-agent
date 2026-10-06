@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "ravi-developer-agent",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "description": "A tenant-isolated developer agent for GitHub, Cloudflare, Supabase, deployment workflows, and secure cloud-browser testing.",
   "author": {
     "name": "Ravi Developer Agent",
@@ -22,14 +22,14 @@
       "interface": {
         "displayName": "Ravi Developer Agent",
         "shortDescription": "Build, deploy, and test apps",
-        "longDescription": "Work with authorized GitHub repositories, Cloudflare deployments, Supabase projects, and a tenant-isolated cloud browser. Read operations are separated from state-changing tools, consequential actions require confirmation, provider credentials stay server-side, and authentication secrets are handled only by provider-controlled OAuth flows.",
+        "longDescription": "Work with authorized GitHub repositories, Cloudflare deployments, Supabase projects, and a tenant-isolated cloud browser. The self-hosted browser supports persistent authenticated profiles, sanitized element inspection, guarded file uploads, and runner-side secret aliases that can fill approved fields without exposing secret values to ChatGPT. Read operations are separated from state-changing tools and consequential actions require confirmation.",
         "developerName": "Ravi Developer Agent",
         "category": "Developer Tools",
         "capabilities": [
           "GitHub repository operations",
           "Cloudflare deployment operations",
           "Supabase database operations",
-          "Cloud browser testing",
+          "Authenticated cloud browser operation",
           "Provider OAuth sign-in",
           "Audit history"
         ],
@@ -103,7 +103,7 @@
         "commerce": false
       },
       "publication": {
-        "release_notes": "1.0.1 adds the self-hosted Chromium backend and a cache-busting Browser Live Preview using authenticated screenshot streaming, while retaining Cloudflare Browser Run as fallback."
+        "release_notes": "1.0.4 adds persistent authenticated browser profiles, sanitized interactive-element inspection, guarded file uploads, and runner-side secret aliases for approved password or environment-secret fields without exposing secret values to ChatGPT. Cloudflare Browser Run remains the fallback for non-profile sessions."
       }
     }
   }
