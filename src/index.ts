@@ -10,6 +10,7 @@ type AuthProps = {
   tenantId: string;
   subject: string;
   loginProvider: "github";
+  login: string;
 };
 
 type Env = {
@@ -44,7 +45,31 @@ export class TenantBrowserSession extends DurableObject<Env> {
 type TenantContext = {
   tenantId: string;
   subject: string;
+  login: string;
+  scopes: string[];
 };
+
+const RESOURCE_METADATA_URL = "https://ravi-developer-agent.rvrmvth.workers.dev/.well-known/oauth-protected-resource/mcp";
+
+function toolAuthRequired(scopes: string[]) {
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: "Additional authorization is required for this action." }],
+    _meta: {
+      "mcp/www_authenticate": `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="${scopes.join(" ")}"`,
+    },
+  };
+}
+
+function safeTab(value: unknown) {
+  const tab = (value ?? {}) as Record<string, unknown>;
+  return {
+    id: typeof tab.id === "string" ? tab.id : "",
+    type: typeof tab.type === "string" ? tab.type : "",
+    title: typeof tab.title === "string" ? tab.title : "",
+    url: typeof tab.url === "string" ? tab.url : "",
+  };
+}
 
 function result(data: unknown) {
   const text = JSON.stringify(data);
@@ -78,6 +103,23 @@ function hostnameAllowed(hostname: string, patterns: string[]): boolean {
   return patterns.some((pattern) => pattern.startsWith("*.") ? host.endsWith(pattern.slice(1)) && host !== pattern.slice(2) : host === pattern);
 }
 
+
+async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
+  const target = new URL(url);
+  if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("Unsupported URL scheme.");
+  if (target.username || target.password) throw new Error("Credentials in navigation URLs are not allowed.");
+  if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+  const policy = await tenantBrowserPolicy(env, tenant);
+  if (!hostnameAllowed(target.hostname, policy.allowedDomains)) {
+    throw new Error("Destination hostname is outside this tenant browser session policy.");
+  }
+  const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(policy.sessionId) +
+    "/json/new?url=" + encodeURIComponent(target.toString());
+  const response = await env.BROWSER.fetch(endpoint, { method: "PUT" });
+  if (!response.ok) throw new Error(`Browser tab open failed (${response.status}).`);
+  return safeTab(await response.json());
+}
+
 function createServer(tenant: TenantContext, env: Env) {
   const server = new McpServer({ name: "ravi-developer-agent", version: "0.2.0" });
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
@@ -102,6 +144,23 @@ function createServer(tenant: TenantContext, env: Env) {
       tenant: tenant.tenantId,
       authentication: "oauth-2.1",
       providers: [],
+    }),
+  );
+
+  registerTool(
+    "agent_profile",
+    {
+      title: "Connected Account",
+      description: "Return the authenticated Ravi Developer Agent account identity for connection management.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      _meta: { "openai/profile": true },
+    },
+    async () => result({
+      id: tenant.subject,
+      name: tenant.login,
+      provider: "github",
+      tenant: tenant.tenantId,
     }),
   );
 
@@ -145,17 +204,14 @@ function createServer(tenant: TenantContext, env: Env) {
       tenant: tenant.tenantId,
       provider: "Cloudflare Browser Run",
       capabilities: [
-        "persistent browser sessions",
-        "multiple tabs",
-        "page navigation",
-        "screenshots and snapshots",
-        "DOM/accessibility inspection",
-        "console and network inspection via CDP",
-        "live view and human takeover",
+        "persistent tenant browser sessions",
+        "Cloudflare-enforced hostname guardrails",
+        "multiple tabs and safe page navigation",
+        "tab activation and cleanup",
+        "short-lived read-only Live View in ChatGPT",
       ],
-      isolation: "per-tenant browser context/session required",
-      navigationEnabled: false,
-      reason: "Browser binding and approval-gated navigation tools are not deployed yet.",
+      isolation: "per-tenant browser context/session",
+      navigationEnabled: true,
     }),
   );
 
@@ -163,25 +219,14 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_open",
     {
       title: "Open Website",
-      description: "Open a public HTTP/HTTPS URL in the tenant cloud browser. Private/local network targets are rejected.",
+      description: "Open a permitted HTTP/HTTPS URL in a new tab of the tenant's guarded browser session.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: { url: z.string().url() },
     },
     async ({ url }: { url: string }) => {
-      const target = new URL(url);
-      if (!["http:", "https:"].includes(target.protocol)) throw new Error("Only HTTP/HTTPS URLs are allowed.");
-      const host = target.hostname.toLowerCase();
-      if (host === "localhost" || host === "::1" || host.endsWith(".local") || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) throw new Error("Private/local network targets are not allowed.");
-      if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-      const response = await env.BROWSER.fetch("https://browser-rendering/snapshot", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: target.toString() }),
-      });
-      if (!response.ok) throw new Error(`Browser navigation failed (${response.status}).`);
-      const body = await response.text();
-      return result({ tenant: tenant.tenantId, url: target.toString(), snapshot: body.slice(0, 50000) });
+      const tab = await openTenantTab(env, tenant, url);
+      return result({ tenant: tenant.tenantId, tab });
     },
   );
   registerTool(
@@ -226,47 +271,80 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async () => {
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
-    const response = await env.BROWSER.fetch(`https://browser-rendering/devtools/browser/${encodeURIComponent(sessionId)}/json/list?liveViewUrlExpiresInMs=300000`);
+    const response = await env.BROWSER.fetch(`https://browser-rendering/devtools/browser/${encodeURIComponent(sessionId)}/json/list`);
     if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
-    return result({ tenant: tenant.tenantId, tabs: await response.json() });
+    const rawTabs = await response.json() as unknown[];
+    return result({ tenant: tenant.tenantId, tabs: rawTabs.map(safeTab) });
   });
   registerTool("browser_tab_open", {
     title: "Open Browser Tab",
-    description: "Open a public web URL in a new tab of an existing tenant browser session.",
+    description: "Open a permitted web URL in a new tab of the tenant's guarded browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: { url: z.string().url() },
   }, async ({ url }: { url: string }) => {
-    const target = new URL(url);
-    if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("Unsupported URL scheme.");
-    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const policy = await tenantBrowserPolicy(env, tenant);
-    if (!hostnameAllowed(target.hostname, policy.allowedDomains)) throw new Error("Destination hostname is outside this tenant browser session policy.");
-    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(policy.sessionId) + "/json/new?url=" + encodeURIComponent(target.toString()) + "&liveViewUrlExpiresInMs=300000";
-    const response = await env.BROWSER.fetch(endpoint, { method: "PUT" });
-    if (!response.ok) throw new Error("Browser tab open failed.");
-    return result({ tenant: tenant.tenantId, tab: await response.json() });
+    const tab = await openTenantTab(env, tenant, url);
+    return result({ tenant: tenant.tenantId, tab });
   });
-  registerTool("browser_page_preview", {
-    title: "Browser Page Preview",
-    description: "Capture a PNG preview of a public web page for display in ChatGPT.",
+
+  registerTool("browser_tab_activate", {
+    title: "Activate Browser Tab",
+    description: "Make a tab active in the tenant browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-    annotations: { readOnlyHint: true, destructiveHint: false },
-    inputSchema: { url: z.string().url() },
-  }, async ({ url }: { url: string }) => {
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/) },
+  }, async ({ targetId }: { targetId: string }) => {
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const response = await env.BROWSER.fetch("https://browser-rendering/screenshot", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) });
-    if (!response.ok) throw new Error("Browser preview failed.");
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    let binary = "";
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    return { content: [{ type: "image", data: btoa(binary), mimeType: "image/png" }] };
+    const sessionId = await tenantSessionId(env, tenant);
+    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) +
+      "/json/activate/" + encodeURIComponent(targetId);
+    const response = await env.BROWSER.fetch(endpoint);
+    if (!response.ok) throw new Error(`Browser tab activation failed (${response.status}).`);
+    return result({ tenant: tenant.tenantId, targetId, active: true });
   });
+
+  registerTool("browser_tab_close", {
+    title: "Close Browser Tab",
+    description: "Close a tab in the tenant browser session.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/) },
+  }, async ({ targetId }: { targetId: string }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const sessionId = await tenantSessionId(env, tenant);
+    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) +
+      "/json/close/" + encodeURIComponent(targetId);
+    const response = await env.BROWSER.fetch(endpoint);
+    if (!response.ok) throw new Error(`Browser tab close failed (${response.status}).`);
+    return result({ tenant: tenant.tenantId, targetId, closed: true });
+  });
+
+  registerTool("browser_session_close", {
+    title: "Close Browser Session",
+    description: "Close the tenant's current cloud browser session and clear its ownership record.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {},
+  }, async () => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const sessionId = await tenantSessionId(env, tenant);
+    const response = await env.BROWSER.fetch(
+      "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId),
+      { method: "DELETE" },
+    );
+    if (!response.ok && response.status !== 404) throw new Error(`Browser session close failed (${response.status}).`);
+    const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
+    await env.BROWSER_SESSIONS.get(ownerId).fetch("https://browser-session/session", { method: "DELETE" });
+    return result({ tenant: tenant.tenantId, closed: true });
+  });
+
   registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v1.html", {}, async () => ({
     contents: [{
       uri: "ui://ravi-developer-agent/browser-v1.html",
       mimeType: RESOURCE_MIME_TYPE,
-      text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const u=v?.structuredContent?.liveView?.devtoolsFrontendUrl||v?.structuredContent?.liveView?.url||v?.liveView?.devtoolsFrontendUrl||v?.liveView?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params) });if(window.openai?.toolOutput)apply(window.openai.toolOutput);</script></body></html>`,
+      text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params) });apply(window.openai?.toolResponseMetadata);</script></body></html>`,
       _meta: { ui: { prefersBorder: false, csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
     }],
   }));
@@ -287,7 +365,12 @@ function createServer(tenant: TenantContext, env: Env) {
       body: JSON.stringify({ expiresInMs: 300000, mode: "tab", guardrails: { mode: "readonly" } }),
     });
     if (!response.ok) throw new Error("Live view creation failed.");
-    return result({ tenant: tenant.tenantId, liveView: await response.json() });
+    const liveView = await response.json();
+    return {
+      structuredContent: { tenant: tenant.tenantId, browserReady: true },
+      content: [{ type: "text" as const, text: "Secure read-only browser view is ready." }],
+      _meta: { liveView },
+    };
   });
   return server;
 }
@@ -313,6 +396,8 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
       const tenant: TenantContext = {
         tenantId: ctx.props.tenantId,
         subject: ctx.props.subject,
+        login: ctx.props.login,
+        scopes: ctx.auth.scope,
       };
       const mcp = createMcpHandler(() => createServer(tenant, env), { route: "/mcp" });
       return mcp(request, env, ctx);
