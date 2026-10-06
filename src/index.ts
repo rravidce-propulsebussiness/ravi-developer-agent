@@ -2032,7 +2032,40 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
       // OAuthResourceServer has already authenticated the request. Its context is
       // not a Worker ExecutionContext, so use the stateless handler's middleware
       // fetch API rather than invoking the Worker-callable form with OAuth ctx.
-      return mcp.fetch(request);
+      let rpcMethod = "unknown";
+      let rpcId: string | number | null = null;
+      if (request.method === "POST") {
+        try {
+          const body = await request.clone().json() as { method?: unknown; id?: unknown };
+          if (typeof body.method === "string") rpcMethod = body.method;
+          if (typeof body.id === "string" || typeof body.id === "number" || body.id === null) rpcId = body.id;
+        } catch {
+          // Do not log request bodies or parameters.
+        }
+      }
+      const response = await mcp.fetch(request);
+      try {
+        const contentType = response.headers.get("content-type") ?? "";
+        if (contentType.includes("application/json")) {
+          const body = await response.clone().json() as any;
+          const toolCount = Array.isArray(body?.result?.tools) ? body.result.tools.length : undefined;
+          const errorCode = body?.error?.code;
+          const errorMessage = body?.error?.message;
+          console.log("MCP RPC", {
+            method: rpcMethod,
+            id: rpcId,
+            status: response.status,
+            toolCount,
+            errorCode,
+            errorMessage,
+          });
+        } else {
+          console.log("MCP RPC", { method: rpcMethod, id: rpcId, status: response.status });
+        }
+      } catch {
+        console.log("MCP RPC", { method: rpcMethod, id: rpcId, status: response.status });
+      }
+      return response;
     },
   },
 });
