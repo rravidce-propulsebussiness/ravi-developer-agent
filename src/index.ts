@@ -4,6 +4,7 @@ import { z } from "zod";
 import { DurableObject } from "cloudflare:workers";
 import { OAuthResourceServer, insufficientScope, type AuthorizationServerBinding } from "@cloudflare/workers-oauth-provider";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
+import puppeteer from "@cloudflare/puppeteer";
 
 type AuthProps = {
   userId: string;
@@ -118,6 +119,20 @@ async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
   const response = await env.BROWSER.fetch(endpoint, { method: "PUT" });
   if (!response.ok) throw new Error(`Browser tab open failed (${response.status}).`);
   return safeTab(await response.json());
+}
+
+async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: string) {
+  if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+  const sessionId = await tenantSessionId(env, tenant);
+  const browser = await puppeteer.connect(env.BROWSER as any, sessionId);
+  const pages = await browser.pages();
+  let page = pages.find((candidate: any) => targetId && String((candidate.target() as any)._targetId ?? "") === targetId);
+  if (!page && !targetId) page = pages.find((candidate: any) => candidate.url() !== "about:blank") ?? pages[0];
+  if (!page) {
+    browser.disconnect();
+    throw new Error("Requested browser page is not available.");
+  }
+  return { browser, page, targetId: String((page.target() as any)._targetId ?? "") };
 }
 
 function createServer(tenant: TenantContext, env: Env) {
@@ -340,6 +355,50 @@ function createServer(tenant: TenantContext, env: Env) {
     return result({ tenant: tenant.tenantId, closed: true });
   });
 
+  registerTool("browser_screenshot", {
+    title: "Browser Screenshot",
+    description: "Capture the current guarded tenant-browser page as a PNG image.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional() },
+  }, async ({ targetId }: { targetId?: string }) => {
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      const screenshot = await page.screenshot({ type: "png" });
+      const bytes = screenshot instanceof Uint8Array ? screenshot : new Uint8Array(screenshot as ArrayBuffer);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return {
+        structuredContent: { tenant: tenant.tenantId, targetId: resolvedTargetId, url: page.url() },
+        content: [{ type: "image" as const, data: btoa(binary), mimeType: "image/png" }],
+      };
+    } finally {
+      browser.disconnect();
+    }
+  });
+
+  registerTool("browser_page_text", {
+    title: "Read Browser Page",
+    description: "Read visible text and basic page metadata from the current guarded tenant-browser page.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional() },
+  }, async ({ targetId }: { targetId?: string }) => {
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      const visibleText = String(await page.evaluate(() => (globalThis as any).document?.body?.innerText ?? ""));
+      return result({
+        tenant: tenant.tenantId,
+        targetId: resolvedTargetId,
+        url: page.url(),
+        title: await page.title(),
+        text: visibleText.slice(0, 50000),
+      });
+    } finally {
+      browser.disconnect();
+    }
+  });
+
   registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v1.html", {}, async () => ({
     contents: [{
       uri: "ui://ravi-developer-agent/browser-v1.html",
@@ -348,6 +407,32 @@ function createServer(tenant: TenantContext, env: Env) {
       _meta: { ui: { prefersBorder: false, csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
     }],
   }));
+
+  registerTool("browser_live_control", {
+    title: "Interactive Browser Control",
+    description: "Create a short-lived interactive browser view for secure human takeover, including manual sign-in.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {},
+    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v1.html" } },
+  }, async () => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const sessionId = await tenantSessionId(env, tenant);
+    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/live_view";
+    const response = await env.BROWSER.fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expiresInMs: 300000, mode: "tab" }),
+    });
+    if (!response.ok) throw new Error("Interactive browser view creation failed.");
+    const liveView = await response.json();
+    return {
+      structuredContent: { tenant: tenant.tenantId, browserReady: true, interactive: true },
+      content: [{ type: "text" as const, text: "Interactive browser control is ready for secure human takeover." }],
+      _meta: { liveView },
+    };
+  });
 
   registerTool("browser_live_view", {
     title: "Browser Live View",
