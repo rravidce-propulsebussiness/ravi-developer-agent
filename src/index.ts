@@ -2261,18 +2261,90 @@ function createServer(tenant: TenantContext, env: Env) {
     }
   });
 
-  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v2.html", {}, async () => {
-    const frameDomains = ["https://live.browser.run", PUBLIC_WORKER_ORIGIN];
+  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v3.html", {}, async () => {
     return {
       contents: [{
-        uri: "ui://ravi-developer-agent/browser-v2.html",
+        uri: "ui://ravi-developer-agent/browser-v3.html",
         mimeType: RESOURCE_MIME_TYPE,
-        text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser" allow="clipboard-read; clipboard-write"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params)});apply(window.openai?.toolResponseMetadata);</script></body></html>`,
+        text: `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{width:100%;height:100%;margin:0;background:#07111c;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
+#root{position:relative;width:100%;height:100%;display:grid;place-items:center}
+#status{position:absolute;left:12px;bottom:12px;z-index:3;padding:7px 10px;border-radius:999px;background:rgba(0,0,0,.62);font-size:12px;backdrop-filter:blur(8px)}
+#shot{display:none;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
+#frame{display:none;width:100%;height:100%;border:0}
+</style>
+</head>
+<body>
+<div id="root">
+  <img id="shot" alt="Ravi Developer Agent live browser">
+  <iframe id="frame" title="Ravi Developer Agent browser"></iframe>
+  <div id="status">Preparing secure browser view…</div>
+</div>
+<script>
+const status=document.getElementById("status");
+const shot=document.getElementById("shot");
+const frame=document.getElementById("frame");
+let timer=null;
+let currentFrameUrl="";
+function startFrames(url){
+  if(currentFrameUrl===url&&timer)return;
+  currentFrameUrl=url;
+  if(timer){clearTimeout(timer);timer=null}
+  frame.style.display="none";
+  shot.style.display="block";
+  const tick=()=>{
+    const sep=url.includes("?")?"&":"?";
+    shot.src=url+sep+"ts="+Date.now();
+  };
+  shot.onload=()=>{
+    status.textContent="Live · read only";
+    timer=setTimeout(tick,650);
+  };
+  shot.onerror=()=>{
+    status.textContent="Live view frame unavailable";
+    timer=setTimeout(tick,1500);
+  };
+  tick();
+}
+function apply(v){
+  const host=window.openai?.toolResponseMetadata;
+  const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;
+  const lv=meta?.liveView;
+  if(!lv)return;
+  if(lv.frameUrl){
+    startFrames(lv.frameUrl);
+    return;
+  }
+  const u=lv.devtoolsFrontendUrl||lv.url;
+  if(u){
+    if(timer){clearTimeout(timer);timer=null}
+    shot.style.display="none";
+    frame.src=u;
+    frame.style.display="block";
+    status.style.display="none";
+  }
+}
+window.addEventListener("message",e=>{
+  const m=e.data;
+  if(m?.method==="ui/notifications/tool-result")apply(m.params)
+});
+apply(window.openai?.toolResponseMetadata);
+</script>
+</body>
+</html>`,
         _meta: {
           ui: {
             prefersBorder: false,
             domain: "https://ravi-developer-agent.rvrmvth.workers.dev",
-            csp: { frameDomains },
+            csp: {
+              resourceDomains: [PUBLIC_WORKER_ORIGIN],
+              frameDomains: ["https://live.browser.run"],
+            },
           },
           "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] },
         },
@@ -2286,7 +2358,7 @@ function createServer(tenant: TenantContext, env: Env) {
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {},
-    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v2.html" } },
+    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v3.html" } },
   }, async () => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     const policy = await tenantBrowserPolicy(env, tenant);
@@ -2302,7 +2374,7 @@ function createServer(tenant: TenantContext, env: Env) {
         content: [{ type: "text" as const, text: "Secure self-hosted browser live view is ready." }],
         _meta: {
           liveView: {
-            url: `${PUBLIC_WORKER_ORIGIN}/browser-live/${encodeURIComponent(liveViewToken)}/`,
+            frameUrl: `${PUBLIC_WORKER_ORIGIN}/browser-live/${encodeURIComponent(liveViewToken)}/frame`,
             expiresAt: runnerLiveView.expiresAt,
           },
         },
