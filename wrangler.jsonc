@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-06",
   "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true },
+  "observability": { "enabled": true, "redact_query_string": true },
   "browser": { "binding": "BROWSER" },
   "services": [{ "binding": "AUTH_SERVER", "service": "ravi-developer-agent-auth" }],
   "durable_objects": {
