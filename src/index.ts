@@ -235,9 +235,10 @@ function createServer(tenant: TenantContext) {
     description: "Create a short-lived read-only live view for an existing browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
-    inputSchema: { sessionId: z.string().uuid() },
-  }, async ({ sessionId }) => {
+    inputSchema: {},
+  }, async () => {
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const sessionId = await tenantSessionId(env, tenant);
     const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/live_view";
     const response = await env.BROWSER.fetch(endpoint, {
       method: "POST", headers: { "content-type": "application/json" },
