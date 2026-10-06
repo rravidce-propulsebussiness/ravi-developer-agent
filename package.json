@@ -14,16 +14,16 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
-    "agents": "latest",
-    "zod": "latest",
-    "@cloudflare/workers-oauth-provider": "^1.0.0",
-    "@modelcontextprotocol/ext-apps": "latest",
-    "@cloudflare/puppeteer": "^1.1.0"
+    "agents": "0.26.0",
+    "zod": "4.6.5",
+    "@cloudflare/workers-oauth-provider": "1.2.2",
+    "@modelcontextprotocol/ext-apps": "2.0.3",
+    "@cloudflare/puppeteer": "1.4.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "latest",
-    "typescript": "latest",
-    "wrangler": "latest",
-    "vitest": "latest"
+    "@cloudflare/workers-types": "5.20261006.1",
+    "typescript": "7.0.2",
+    "wrangler": "4.147.0",
+    "vitest": "5.0.3"
   }
 }
