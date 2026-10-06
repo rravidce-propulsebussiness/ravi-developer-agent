@@ -2138,6 +2138,7 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
   resourceMetadata: {
     resource: MCP_RESOURCE,
     authorization_servers: [AUTH_ISSUER],
+    scopes_supported: ["agent:read", "agent:write"],
     resource_name: "Ravi Developer Agent",
   },
   requiredScopes: ["agent:read"],
