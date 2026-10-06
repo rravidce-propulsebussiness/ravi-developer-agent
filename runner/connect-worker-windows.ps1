@@ -20,20 +20,13 @@ if ($token.Length -lt 32) { throw "RUNNER_TOKEN is invalid." }
 $repoRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $repoRoot
 try {
-  Write-Host "Checking Cloudflare CLI login..."
-  & npx.cmd wrangler whoami *> $null
-  if ($LASTEXITCODE -ne 0) {
-    Write-Host "Cloudflare authorization is required. A browser window will open."
-    & npx.cmd wrangler login
-    if ($LASTEXITCODE -ne 0) { throw "Cloudflare login failed." }
-  }
-
+  Write-Host "Using the existing Cloudflare CLI login..."
   Write-Host "Updating Worker runner URL..."
-  $url | & npx.cmd wrangler secret put SELF_HOSTED_BROWSER_URL --name ravi-developer-agent
+  $url | & npx.cmd --yes wrangler@4.147.0 secret put SELF_HOSTED_BROWSER_URL --name ravi-developer-agent
   if ($LASTEXITCODE -ne 0) { throw "Failed to set SELF_HOSTED_BROWSER_URL." }
 
   Write-Host "Updating Worker runner token securely..."
-  $token | & npx.cmd wrangler secret put SELF_HOSTED_BROWSER_TOKEN --name ravi-developer-agent
+  $token | & npx.cmd --yes wrangler@4.147.0 secret put SELF_HOSTED_BROWSER_TOKEN --name ravi-developer-agent
   if ($LASTEXITCODE -ne 0) { throw "Failed to set SELF_HOSTED_BROWSER_TOKEN." }
 
   Write-Host ""
