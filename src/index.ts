@@ -24,6 +24,7 @@ type Env = {
   BROWSER_SESSIONS: DurableObjectNamespace<TenantBrowserSession>;
   PROVIDER_CONNECTIONS: DurableObjectNamespace<TenantConnections>;
   OAUTH_CONNECT_STATE: DurableObjectNamespace<OAuthConnectState>;
+  TENANT_GUARD: DurableObjectNamespace<TenantGuard>;
   AUTH_SERVER: AuthServerService;
   CLOUDFLARE_OAUTH_CLIENT_ID?: string;
   CLOUDFLARE_OAUTH_CLIENT_SECRET?: string;
@@ -107,6 +108,81 @@ export class OAuthConnectState extends DurableObject<Env> {
       return Response.json(body);
     }
     return new Response("not_found", { status: 404 });
+  }
+}
+
+export class TenantGuard extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (request.method === "POST" && url.pathname === "/consume") {
+      const now = Date.now();
+      const minute = Math.floor(now / 60_000);
+      const key = "rate:" + minute;
+      const count = (await this.ctx.storage.get<number>(key)) ?? 0;
+      const limit = 120;
+      if (count >= limit) {
+        return Response.json({ ok: false, retryAfterSeconds: 60 - Math.floor((now % 60_000) / 1000) }, { status: 429 });
+      }
+      await this.ctx.storage.put(key, count + 1);
+      const previous = "rate:" + (minute - 2);
+      await this.ctx.storage.delete(previous);
+      return Response.json({ ok: true, remaining: Math.max(0, limit - count - 1) });
+    }
+
+    if (request.method === "POST" && url.pathname === "/audit") {
+      const body = await request.json() as { action?: string; subject?: string };
+      if (!body.action || !/^[a-z0-9_:-]{1,128}$/i.test(body.action)) return new Response("invalid_action", { status: 400 });
+      const timestamp = Date.now();
+      const id = crypto.randomUUID();
+      await this.ctx.storage.put("audit:" + String(timestamp).padStart(13, "0") + ":" + id, {
+        timestamp,
+        action: body.action,
+        subject: body.subject ?? "",
+      });
+      const cutoff = timestamp - 30 * 24 * 60 * 60 * 1000;
+      const old = await this.ctx.storage.list<{ timestamp?: number }>({ prefix: "audit:", limit: 100 });
+      const stale = [...old.entries()].filter(([, value]) => (value?.timestamp ?? timestamp) < cutoff).map(([key]) => key);
+      if (stale.length) await this.ctx.storage.delete(stale);
+      return Response.json({ ok: true });
+    }
+
+    if (request.method === "GET" && url.pathname === "/audit") {
+      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));
+      const list = await this.ctx.storage.list<{ timestamp: number; action: string; subject: string }>({ prefix: "audit:", reverse: true, limit });
+      return Response.json({ events: [...list.values()] });
+    }
+
+    return new Response("not_found", { status: 404 });
+  }
+}
+
+async function tenantGuard(env: Env, tenantId: string) {
+  return env.TENANT_GUARD.get(env.TENANT_GUARD.idFromName(tenantId));
+}
+
+async function enforceTenantRateLimit(env: Env, tenantId: string): Promise<Response | null> {
+  const response = await (await tenantGuard(env, tenantId)).fetch("https://tenant-guard/consume", { method: "POST" });
+  if (response.status !== 429) return null;
+  const body = await response.json() as { retryAfterSeconds?: number };
+  return new Response("Too many requests", {
+    status: 429,
+    headers: {
+      "retry-after": String(body.retryAfterSeconds ?? 60),
+      "cache-control": "no-store",
+    },
+  });
+}
+
+async function auditTenantAction(env: Env, tenant: TenantContext, action: string): Promise<void> {
+  try {
+    await (await tenantGuard(env, tenant.tenantId)).fetch("https://tenant-guard/audit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action, subject: tenant.subject }),
+    });
+  } catch {
+    // Audit failure must never expose secrets or break the requested action.
   }
 }
 
@@ -494,8 +570,41 @@ function createServer(tenant: TenantContext, env: Env) {
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
-  const registerTool = (name: string, config: unknown, handler: unknown) =>
-    (registerAppTool as any)(server, name, config, handler);
+  const registerTool = (name: string, config: any, handler: any) => {
+    const wrapped = async (...args: any[]) => {
+      const output = await handler(...args);
+      const requiresConfirmation = Boolean((output as any)?.structuredContent?.requiresConfirmation);
+      if (config?.annotations?.readOnlyHint === false && !requiresConfirmation) {
+        await auditTenantAction(env, tenant, name);
+      }
+      return output;
+    };
+    return (registerAppTool as any)(server, name, config, wrapped);
+  };
+
+  registerTool(
+    "audit_recent",
+    {
+      title: "Recent Audit Activity",
+      description: "Show recent state-changing Ravi Developer Agent actions for the authenticated tenant. Secret values and tool payloads are never recorded.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { limit: z.number().int().min(1).max(100).default(25) },
+    },
+    async ({ limit }: { limit: number }) => {
+      const response = await (await tenantGuard(env, tenant.tenantId)).fetch("https://tenant-guard/audit?limit=" + encodeURIComponent(String(limit)));
+      if (!response.ok) throw new Error("Audit history is unavailable.");
+      const body = await response.json() as { events?: Array<{ timestamp: number; action: string; subject: string }> };
+      return result({
+        tenant: tenant.tenantId,
+        retentionDays: 30,
+        events: (body.events ?? []).map((event) => ({
+          timestamp: new Date(event.timestamp).toISOString(),
+          action: event.action,
+        })),
+      });
+    },
+  );
 
   registerTool(
     "agent_status",
@@ -1440,6 +1549,8 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
         scopes: ctx.auth.scope,
         githubToken: ctx.props.githubToken,
       };
+      const limited = await enforceTenantRateLimit(env, tenant.tenantId);
+      if (limited) return limited;
       const mcp = createMcpHandler(() => createServer(tenant, env), { route: "/mcp" });
       return mcp(request, env, ctx);
     },
