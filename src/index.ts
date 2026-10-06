@@ -593,7 +593,7 @@ async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: str
 }
 
 function createServer(tenant: TenantContext, env: Env) {
-  const server = new McpServer({ name: "ravi-developer-agent", version: "0.6.0" });
+  const server = new McpServer({ name: "ravi-developer-agent", version: "1.0.0" });
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
@@ -673,7 +673,7 @@ function createServer(tenant: TenantContext, env: Env) {
     async () => result({
       ok: true,
       service: "Ravi Developer Agent",
-      version: "0.6.0",
+      version: "1.0.0",
       transport: "MCP Streamable HTTP",
       authentication: "oauth-2.1",
       providers: {
@@ -1997,7 +1997,7 @@ export default {
       return Response.json({
         ok: true,
         service: "ravi-developer-agent",
-        version: "0.6.0",
+        version: "1.0.0",
         authentication: "oauth-2.1",
         providerOAuth: {
           storage: "tenant-durable-object-aes-256-at-rest",
@@ -2007,14 +2007,17 @@ export default {
       }, { headers: { "cache-control": "no-store" } });
     }
 
-    if (url.pathname === "/") {
-      return Response.json({
-        name: "Ravi Developer Agent",
-        version: "0.6.0",
-        mcp: "/mcp",
-        health: "/health",
-        authentication: "OAuth 2.1 required for MCP",
-      });
+    if (url.pathname === "/" || url.pathname === "/about") {
+      return publicPage("Ravi Developer Agent", `
+<p>Ravi Developer Agent is a tenant-isolated developer plugin for GitHub, Cloudflare, Supabase, and guarded cloud-browser verification.</p>
+<h2>What it does</h2>
+<p>Inspect repositories, prepare and apply approved code changes, inspect Cloudflare deployments, inspect Supabase schema metadata and apply confirmed migrations, and verify public web applications in an isolated browser.</p>
+<h2>Security boundaries</h2>
+<p>Account access uses OAuth. State-changing tools require write authorization where applicable and consequential actions use confirmation gates. The public plugin does not ask users to enter passwords, API keys, MFA/OTP codes, payment-card data, or other authentication secrets.</p>
+<h2>Links</h2>
+<p><a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a> · <a href="/support">Support</a></p>
+<p><a href="https://github.com/rravidce-propulsebussiness/ravi-developer-agent">Source repository</a></p>
+`);
     }
 
     if (url.pathname === "/oauth/cloudflare/callback") {
