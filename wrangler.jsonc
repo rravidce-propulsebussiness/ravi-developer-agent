@@ -8,7 +8,14 @@
   "browser": { "binding": "BROWSER" },
   "services": [{ "binding": "AUTH_SERVER", "service": "ravi-developer-agent-auth" }],
   "durable_objects": {
-    "bindings": [{ "name": "BROWSER_SESSIONS", "class_name": "TenantBrowserSession" }]
+    "bindings": [
+      { "name": "BROWSER_SESSIONS", "class_name": "TenantBrowserSession" },
+      { "name": "PROVIDER_CONNECTIONS", "class_name": "TenantConnections" },
+      { "name": "OAUTH_CONNECT_STATE", "class_name": "OAuthConnectState" }
+    ]
   },
-  "migrations": [{ "tag": "browser-sessions-v1", "new_sqlite_classes": ["TenantBrowserSession"] }]
+  "migrations": [
+    { "tag": "browser-sessions-v1", "new_sqlite_classes": ["TenantBrowserSession"] },
+    { "tag": "provider-connections-v1", "new_sqlite_classes": ["TenantConnections", "OAuthConnectState"] }
+  ]
 }
