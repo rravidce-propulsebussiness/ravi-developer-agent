@@ -566,7 +566,7 @@ async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: str
 }
 
 function createServer(tenant: TenantContext, env: Env) {
-  const server = new McpServer({ name: "ravi-developer-agent", version: "0.2.0" });
+  const server = new McpServer({ name: "ravi-developer-agent", version: "0.6.0" });
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
@@ -617,18 +617,18 @@ function createServer(tenant: TenantContext, env: Env) {
     async () => result({
       ok: true,
       service: "Ravi Developer Agent",
-      version: "0.2.0",
+      version: "0.6.0",
       transport: "MCP Streamable HTTP",
       tenant: tenant.tenantId,
       authentication: "oauth-2.1",
       providers: {
         github: { configured: true, connected: true },
         cloudflare: {
-          configured: providerConfigured(env, "cloudflare"),
+          configured: await providerConfigured(env, "cloudflare"),
           connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
         },
         supabase: {
-          configured: providerConfigured(env, "supabase"),
+          configured: await providerConfigured(env, "supabase"),
           connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
         },
       },
@@ -656,7 +656,7 @@ function createServer(tenant: TenantContext, env: Env) {
     "project_plan",
     {
       title: "Project Plan",
-      description: "Create a safe execution plan for a cloud development task before provider actions are enabled.",
+      description: "Create a safe multi-provider execution plan for a cloud development task.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: {
