@@ -2124,8 +2124,8 @@ function publicPage(title: string, body: string): Response {
 
 const PRIVACY_HTML = `
 <p>Ravi Developer Agent helps users work with software projects through user-authorized GitHub, Cloudflare, Supabase, and cloud-browser connections.</p>
-<h2>Data we process</h2><p>We process the account identity, repository or project information, tool inputs, and provider authorization tokens required to perform requested actions. Provider tokens remain server-side and are not intentionally returned in MCP tool output. Browser sessions are isolated per tenant.</p>
-<h2>Storage and retention</h2><p>Provider connection data is kept in tenant-specific Cloudflare storage. Action audit records contain action names and timestamps, not secret values or tool payloads, and are retained for up to 30 days. Short-lived OAuth and secure-entry state expires automatically.</p>
+<h2>Data we process</h2><p>We process the account identity, a verified email address for OAuth workspace-domain protections, repository or project information, tool inputs, and provider authorization tokens required to perform requested actions. Provider tokens remain server-side and are not intentionally returned in MCP tool output. Browser sessions are isolated per tenant.</p>
+<h2>Storage and retention</h2><p>Provider connection data is kept in tenant-specific Cloudflare storage. Action audit records contain action names and timestamps, not secret values or tool payloads, and are retained for up to 30 days. Short-lived OAuth, secure-entry state, and publisher-setup cookies expire automatically.</p>
 <h2>Sharing</h2><p>Data is sent only to services the user connects or websites the user asks the browser to access, as needed to perform requested actions. We do not sell user data.</p>
 <h2>Controls</h2><p>Users can disconnect supported providers, close browser sessions, and revoke provider authorization at the provider. Sensitive values such as Worker secret contents are entered through dedicated secure pages rather than normal ChatGPT tool inputs.</p>
 <h2>Contact</h2><p>For privacy questions or deletion requests, use the project support page.</p>`;
