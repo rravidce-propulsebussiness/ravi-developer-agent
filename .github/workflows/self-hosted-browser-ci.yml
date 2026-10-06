@@ -1,0 +1,42 @@
+name: Self-hosted browser branch CI
+
+on:
+  push:
+    branches:
+      - feature/self-hosted-browser-runner
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "runner/**"
+      - "package.json"
+      - "tests/**"
+      - ".github/workflows/self-hosted-browser-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install --ignore-scripts
+      - run: npm run verify
+
+  verify-runner:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm install --ignore-scripts
+      - run: npm run check
