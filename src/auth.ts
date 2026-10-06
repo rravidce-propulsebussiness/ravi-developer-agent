@@ -1,6 +1,7 @@
 import {
   AuthorizationError,
   OAuthAuthorizationServer,
+  type AuthRequest,
 } from "@cloudflare/workers-oauth-provider";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
@@ -76,7 +77,7 @@ function randomVerifier(): string {
   return base64Url(bytes);
 }
 
-async function startGithubSignIn(request: Request, env: AuthEnv, approvedRequest: Parameters<Awaited<ReturnType<ReturnType<typeof authorizationServer.getOAuthApi>["beginUpstream"]>>>[0] extends never ? never : any, headers: Headers): Promise<Response> {
+async function startGithubSignIn(_request: Request, env: AuthEnv, approvedRequest: AuthRequest, headers: Headers): Promise<Response> {
   if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
     return new Response("GitHub sign-in is not configured.", { status: 503, headers: { "cache-control": "no-store" } });
   }
