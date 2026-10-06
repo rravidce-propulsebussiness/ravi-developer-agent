@@ -58,12 +58,6 @@
               "expected_behavior": "Return only repositories visible to the authenticated GitHub account without exposing OAuth tokens."
             },
             {
-              "description": "Read a repository file",
-              "prompt": "Read the package.json from the test repository.",
-              "tools_triggered": "github_get_file",
-              "expected_behavior": "Return the requested UTF-8 file and repository metadata without changing the repository."
-            },
-            {
               "description": "Inspect Cloudflare account",
               "prompt": "List my connected Cloudflare accounts.",
               "tools_triggered": "cloudflare_list_accounts",
