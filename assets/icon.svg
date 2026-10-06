@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Ravi Developer Agent">
+  <rect width="512" height="512" rx="112" fill="#0F172A"/>
+  <path d="M188 154 86 256l102 102" fill="none" stroke="#93C5FD" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m324 154 102 102-102 102" fill="none" stroke="#93C5FD" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m292 112-72 288" fill="none" stroke="#38BDF8" stroke-width="36" stroke-linecap="round"/>
+</svg>
