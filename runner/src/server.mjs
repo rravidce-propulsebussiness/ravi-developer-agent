@@ -125,7 +125,17 @@ function getSession(sessionId) {
   return session;
 }
 
+function pruneClosedPages(session) {
+  for (const [targetId, page] of session.pages) {
+    if (!page || page.isClosed()) session.pages.delete(targetId);
+  }
+  if (session.activeTargetId && !session.pages.has(session.activeTargetId)) {
+    session.activeTargetId = session.pages.keys().next().value || null;
+  }
+}
+
 function findPage(session, targetId) {
+  pruneClosedPages(session);
   const id = targetId || session.activeTargetId;
   if (id && session.pages.has(id)) return { targetId: id, page: session.pages.get(id) };
   const first = session.pages.entries().next();
@@ -396,9 +406,20 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && tail === "tabs") {
+    pruneClosedPages(session);
     const tabs = [];
     for (const [targetId, page] of session.pages) {
-      tabs.push({ ...(safeTab(targetId, page)), title: await page.title() });
+      let title = "";
+      try { title = await page.title(); } catch {
+        if (page.isClosed()) {
+          session.pages.delete(targetId);
+          continue;
+        }
+      }
+      tabs.push({ ...(safeTab(targetId, page)), title });
+    }
+    if (session.activeTargetId && !session.pages.has(session.activeTargetId)) {
+      session.activeTargetId = session.pages.keys().next().value || null;
     }
     return json(res, 200, { tabs, activeTargetId: session.activeTargetId });
   }
@@ -419,6 +440,12 @@ async function handleApi(req, res, url) {
     const targetId = makeId(12);
     session.pages.set(targetId, page);
     session.activeTargetId = targetId;
+    page.on("close", () => {
+      session.pages.delete(targetId);
+      if (session.activeTargetId === targetId) {
+        session.activeTargetId = session.pages.keys().next().value || null;
+      }
+    });
     try {
       await page.goto(target.toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
     } catch (error) {
