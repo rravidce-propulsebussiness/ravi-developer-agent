@@ -11,11 +11,13 @@
     "bindings": [
       { "name": "BROWSER_SESSIONS", "class_name": "TenantBrowserSession" },
       { "name": "PROVIDER_CONNECTIONS", "class_name": "TenantConnections" },
-      { "name": "OAUTH_CONNECT_STATE", "class_name": "OAuthConnectState" }
+      { "name": "OAUTH_CONNECT_STATE", "class_name": "OAuthConnectState" },
+      { "name": "TENANT_GUARD", "class_name": "TenantGuard" }
     ]
   },
   "migrations": [
     { "tag": "browser-sessions-v1", "new_sqlite_classes": ["TenantBrowserSession"] },
-    { "tag": "provider-connections-v1", "new_sqlite_classes": ["TenantConnections", "OAuthConnectState"] }
+    { "tag": "provider-connections-v1", "new_sqlite_classes": ["TenantConnections", "OAuthConnectState"] },
+    { "tag": "tenant-guard-v1", "new_sqlite_classes": ["TenantGuard"] }
   ]
 }
