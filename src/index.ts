@@ -2265,10 +2265,10 @@ function createServer(tenant: TenantContext, env: Env) {
     }
   });
 
-  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v4.html", {}, async () => {
+  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-stream-v1.html", {}, async () => {
     return {
       contents: [{
-        uri: "ui://ravi-developer-agent/browser-v4.html",
+        uri: "ui://ravi-developer-agent/browser-stream-v1.html",
         mimeType: RESOURCE_MIME_TYPE,
         text: `<!doctype html>
 <html>
@@ -2345,7 +2345,7 @@ tick();
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
-    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v4.html" } },
+    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-stream-v1.html" } },
   }, async () => {
     const policy = await tenantBrowserPolicy(env, tenant);
     return {
@@ -2355,6 +2355,29 @@ tick();
         refreshMode: "authenticated-screenshot-stream",
       },
       content: [{ type: "text" as const, text: "Secure read-only browser live view is ready." }],
+    };
+  });
+
+  registerTool("browser_live_preview", {
+    title: "Browser Live Preview",
+    description: "Open the current guarded browser as a read-only screenshot-stream preview in ChatGPT. Use this tool when Browser Live View is stale or cached.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: {},
+    _meta: {
+      ui: { resourceUri: "ui://ravi-developer-agent/browser-stream-v1.html" },
+      "openai/outputTemplate": "ui://ravi-developer-agent/browser-stream-v1.html",
+    },
+  }, async () => {
+    const policy = await tenantBrowserPolicy(env, tenant);
+    return {
+      structuredContent: {
+        browserReady: true,
+        backend: policy.backend,
+        refreshMode: "authenticated-screenshot-stream",
+        viewer: "browser_live_preview",
+      },
+      content: [{ type: "text" as const, text: "Browser Live Preview is ready." }],
     };
   });
 
