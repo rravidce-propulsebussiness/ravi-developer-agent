@@ -2058,7 +2058,7 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
     authorization_servers: [AUTH_ISSUER],
     resource_name: "Ravi Developer Agent",
   },
-  requiredScopes: ["agent:read"],
+  requiredScopes: ["agent:read", "agent:write"],
   validateToken: (env) => env.AUTH_SERVER.validateToken,
   handler: {
     async fetch(request, env, ctx) {
