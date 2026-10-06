@@ -8,6 +8,9 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 const AUTH_ISSUER = "https://ravi-developer-agent-auth.rvrmvth.workers.dev";
 const MCP_RESOURCE = "https://ravi-developer-agent.rvrmvth.workers.dev/mcp";
 const GITHUB_CALLBACK = AUTH_ISSUER + "/callback";
+const GITHUB_MANIFEST_CALLBACK = AUTH_ISSUER + "/setup/github-app/callback";
+const GITHUB_APP_OWNER = "rravidce-propulsebussiness";
+const APP_HOME = "https://ravi-developer-agent.rvrmvth.workers.dev";
 
 type AuthEnv = {
   OAUTH_KV: KVNamespace;
@@ -79,20 +82,122 @@ function randomVerifier(): string {
   return base64Url(bytes);
 }
 
+type GithubClient = { clientId: string; clientSecret: string };
+
+async function githubClient(env: AuthEnv): Promise<GithubClient | null> {
+  if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) {
+    return { clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET };
+  }
+  const [clientId, clientSecret] = await Promise.all([
+    env.OAUTH_KV.get("github:client_id"),
+    env.OAUTH_KV.get("github:client_secret"),
+  ]);
+  return clientId && clientSecret ? { clientId, clientSecret } : null;
+}
+
+async function githubConfigured(env: AuthEnv): Promise<boolean> {
+  return Boolean(await githubClient(env));
+}
+
+async function githubManifestPage(env: AuthEnv): Promise<Response> {
+  if (await githubConfigured(env)) {
+    return new Response(`<!doctype html><meta charset="utf-8"><title>GitHub App ready</title><style>body{font-family:system-ui;background:#0f1115;color:#f5f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:620px;padding:28px;border:1px solid #2a3040;border-radius:18px;background:#171a21}</style><div class="card"><h1>GitHub App already configured</h1><p>Ravi Developer Agent can now use GitHub as its sign-in and repository provider.</p></div>`, {
+      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+    });
+  }
+
+  const state = randomVerifier();
+  await env.OAUTH_KV.put("github:manifest_state:" + state, "1", { expirationTtl: 3600 });
+  const manifest = {
+    name: "Ravi Developer Agent",
+    url: APP_HOME,
+    redirect_url: GITHUB_MANIFEST_CALLBACK,
+    callback_urls: [GITHUB_CALLBACK],
+    description: "Tenant-isolated developer agent for GitHub, cloud deployment, and browser testing.",
+    public: true,
+    request_oauth_on_install: true,
+    default_events: [],
+    default_permissions: {
+      metadata: "read",
+      contents: "write",
+      pull_requests: "write",
+      workflows: "write",
+    },
+  };
+  const safeManifest = escapeHtml(JSON.stringify(manifest));
+  const safeState = encodeURIComponent(state);
+  return new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Create Ravi Developer Agent GitHub App</title><style>body{font-family:system-ui;background:#0f1115;color:#f5f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:640px;padding:28px;border:1px solid #2a3040;border-radius:18px;background:#171a21}button{padding:11px 18px;border:0;border-radius:10px;font-weight:700}</style><div class="card"><h1>Create the GitHub App</h1><p>GitHub will show the requested repository permissions before creation. The app is public so other users can install it later.</p><form action="https://github.com/settings/apps/new?state=${safeState}" method="post"><input type="hidden" name="manifest" value="${safeManifest}"><button type="submit">Continue to GitHub</button></form></div>`, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action https://github.com; base-uri 'none'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
+async function githubManifestCallback(request: Request, env: AuthEnv): Promise<Response> {
+  const url = new URL(request.url);
+  const state = url.searchParams.get("state") ?? "";
+  const code = url.searchParams.get("code") ?? "";
+  if (!state || !code) return new Response("Missing GitHub App manifest callback parameters.", { status: 400 });
+  const stateKey = "github:manifest_state:" + state;
+  const expected = await env.OAUTH_KV.get(stateKey);
+  await env.OAUTH_KV.delete(stateKey);
+  if (!expected) return new Response("GitHub App setup state is invalid or expired.", { status: 400 });
+
+  const conversion = await fetch("https://api.github.com/app-manifests/" + encodeURIComponent(code) + "/conversions", {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      "user-agent": "ravi-developer-agent",
+      "x-github-api-version": "2026-03-10",
+    },
+  });
+  if (!conversion.ok) return new Response("GitHub App manifest conversion failed.", { status: 502 });
+
+  const app = await conversion.json() as {
+    client_id?: string;
+    client_secret?: string;
+    slug?: string;
+    owner?: { login?: string };
+  };
+  if (!app.client_id || !app.client_secret || app.owner?.login?.toLowerCase() !== GITHUB_APP_OWNER.toLowerCase()) {
+    return new Response("GitHub App owner validation failed.", { status: 403 });
+  }
+
+  await Promise.all([
+    env.OAUTH_KV.put("github:client_id", app.client_id),
+    env.OAUTH_KV.put("github:client_secret", app.client_secret),
+    env.OAUTH_KV.put("github:app_slug", app.slug ?? ""),
+  ]);
+
+  const installUrl = app.slug ? "https://github.com/apps/" + encodeURIComponent(app.slug) + "/installations/new" : "https://github.com/settings/installations";
+  const safeInstallUrl = escapeHtml(installUrl);
+  return new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App created</title><style>body{font-family:system-ui;background:#0f1115;color:#f5f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:620px;padding:28px;border:1px solid #2a3040;border-radius:18px;background:#171a21}a{display:inline-block;padding:11px 18px;border-radius:10px;background:#fff;color:#111;text-decoration:none;font-weight:700}</style><div class="card"><h1>GitHub App created</h1><p>The client credentials were stored inside the isolated authorization Worker. Install the app on the repositories Ravi Developer Agent should manage.</p><a href="${safeInstallUrl}">Install GitHub App</a></div>`, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; navigate-to https://github.com; base-uri 'none'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
 async function startGithubSignIn(_request: Request, env: AuthEnv, approvedRequest: AuthRequest, headers: Headers): Promise<Response> {
-  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+  const client = await githubClient(env);
+  if (!client) {
     return new Response("GitHub sign-in is not configured.", { status: 503, headers: { "cache-control": "no-store" } });
   }
   const oauth = authorizationServer.getOAuthApi(env);
   const verifier = randomVerifier();
   const upstream = await oauth.beginUpstream(approvedRequest, { data: { verifier }, headers });
   const target = new URL("https://github.com/login/oauth/authorize");
-  target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
+  target.searchParams.set("client_id", client.clientId);
   target.searchParams.set("redirect_uri", GITHUB_CALLBACK);
   target.searchParams.set("state", upstream.state);
   target.searchParams.set("code_challenge", await s256(verifier));
   target.searchParams.set("code_challenge_method", "S256");
-  target.searchParams.set("scope", "read:user repo");
   upstream.headers.set("Location", target.toString());
   return new Response(null, { status: 302, headers: upstream.headers });
 }
@@ -133,7 +238,8 @@ async function authorize(request: Request, env: AuthEnv): Promise<Response> {
 }
 
 async function githubCallback(request: Request, env: AuthEnv): Promise<Response> {
-  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+  const client = await githubClient(env);
+  if (!client) {
     return new Response("GitHub sign-in is not configured.", { status: 503, headers: { "cache-control": "no-store" } });
   }
 
@@ -157,8 +263,8 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
     method: "POST",
     headers: { "accept": "application/json", "content-type": "application/json" },
     body: JSON.stringify({
-      client_id: env.GITHUB_CLIENT_ID,
-      client_secret: env.GITHUB_CLIENT_SECRET,
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
       code,
       redirect_uri: GITHUB_CALLBACK,
       code_verifier: resumed.data.verifier,
@@ -208,9 +314,11 @@ export class AuthServer extends WorkerEntrypoint<AuthEnv> {
         ok: true,
         service: "ravi-developer-agent-auth",
         oauth: "enabled",
-        upstreamLogin: this.env.GITHUB_CLIENT_ID && this.env.GITHUB_CLIENT_SECRET ? "github" : "github-not-configured",
-      });
+        upstreamLogin: await githubConfigured(this.env) ? "github-app" : "github-app-not-configured",
+      }, { headers: { "cache-control": "no-store" } });
     }
+    if (url.pathname === "/setup/github-app") return githubManifestPage(this.env);
+    if (url.pathname === "/setup/github-app/callback") return githubManifestCallback(request, this.env);
     if (url.pathname === "/authorize") return authorize(request, this.env);
     if (url.pathname === "/callback") return githubCallback(request, this.env);
     return authorizationServer.fetch(request, this.env, this.ctx);
