@@ -18,6 +18,7 @@ type AuthProps = {
 type AuthServerService = AuthorizationServerBinding<AuthProps> & {
   getGithubToken(userId: string, fallback?: string): Promise<string | null>;
   getProviderClient(provider: "cloudflare" | "supabase"): Promise<{ clientId: string; clientSecret: string } | null>;
+  deleteUserData(userId: string): Promise<{ revokedGrants: number; githubTokenDeleted: boolean }>;
 };
 
 type Env = {
@@ -63,6 +64,10 @@ type StoredProviderConnection = { value: ProviderConnection; updatedAt: number }
 export class TenantConnections extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "DELETE" && url.pathname === "/all") {
+      await this.ctx.storage.deleteAll();
+      return Response.json({ ok: true });
+    }
     const provider = url.pathname.split("/").filter(Boolean)[1] as ProviderName | undefined;
     if (!provider || !["cloudflare", "supabase"].includes(provider)) {
       return new Response("invalid_provider", { status: 400 });
@@ -156,6 +161,11 @@ export class TenantGuard extends DurableObject<Env> {
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));
       const list = await this.ctx.storage.list<{ timestamp: number; action: string; subject: string }>({ prefix: "audit:", reverse: true, limit });
       return Response.json({ events: [...list.values()] });
+    }
+
+    if (request.method === "DELETE" && url.pathname === "/all") {
+      await this.ctx.storage.deleteAll();
+      return Response.json({ ok: true });
     }
 
     return new Response("not_found", { status: 404 });
@@ -588,7 +598,7 @@ function createServer(tenant: TenantContext, env: Env) {
     const wrapped = async (...args: any[]) => {
       const output = await handler(...args);
       const requiresConfirmation = Boolean((output as any)?.structuredContent?.requiresConfirmation);
-      if (normalizedConfig.annotations.readOnlyHint === false && !requiresConfirmation) {
+      if (normalizedConfig.annotations.readOnlyHint === false && !requiresConfirmation && !normalizedConfig?._meta?.raviSkipAudit) {
         await auditTenantAction(env, tenant, name);
       }
       return output;
@@ -664,6 +674,82 @@ function createServer(tenant: TenantContext, env: Env) {
       provider: "github",
       tenant: tenant.tenantId,
     }),
+  );
+
+  registerTool(
+    "delete_my_data",
+    {
+      title: "Delete My Ravi Developer Agent Data",
+      description: "Permanently delete this authenticated user's Ravi Developer Agent provider connections, browser-session state, audit/rate data, stored GitHub user-token state, and Ravi Developer Agent OAuth grants. This does not delete data held independently by GitHub, Cloudflare, Supabase, or visited websites.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: {
+        confirm: z.boolean().default(false),
+        confirmationText: z.string().max(64).default(""),
+      },
+      _meta: { raviSkipAudit: true },
+    },
+    async ({ confirm, confirmationText }: { confirm: boolean; confirmationText: string }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm || confirmationText !== "DELETE MY DATA") {
+        return result({
+          requiresConfirmation: true,
+          destructive: true,
+          action: "delete_my_data",
+          requiredConfirmationText: "DELETE MY DATA",
+          deletes: [
+            "Cloudflare and Supabase provider connections stored by Ravi Developer Agent",
+            "cloud browser session ownership and browser session",
+            "tenant audit and rate-limit records",
+            "stored GitHub App user-token state",
+            "Ravi Developer Agent OAuth grants",
+          ],
+          doesNotDelete: [
+            "GitHub repositories or provider account data",
+            "Cloudflare account resources",
+            "Supabase projects or databases",
+            "data held by websites visited in the browser",
+          ],
+        });
+      }
+
+      let browserClosed = false;
+      const browserOwner = env.BROWSER_SESSIONS.get(env.BROWSER_SESSIONS.idFromName(tenant.tenantId));
+      try {
+        const sessionResponse = await browserOwner.fetch("https://browser-session/session");
+        if (sessionResponse.ok && env.BROWSER) {
+          const session = await sessionResponse.json() as { sessionId?: string };
+          if (session.sessionId) {
+            const close = await env.BROWSER.fetch(
+              "https://browser-rendering/devtools/browser/" + encodeURIComponent(session.sessionId),
+              { method: "DELETE" },
+            );
+            browserClosed = close.ok || close.status === 404;
+          }
+        }
+      } catch {
+        browserClosed = false;
+      }
+      await browserOwner.fetch("https://browser-session/session", { method: "DELETE" });
+
+      const connections = env.PROVIDER_CONNECTIONS.get(env.PROVIDER_CONNECTIONS.idFromName(tenant.tenantId));
+      await connections.fetch("https://provider-connections/all", { method: "DELETE" });
+
+      const guard = env.TENANT_GUARD.get(env.TENANT_GUARD.idFromName(tenant.tenantId));
+      await guard.fetch("https://tenant-guard/all", { method: "DELETE" });
+
+      const authDeletion = await env.AUTH_SERVER.deleteUserData(tenant.subject);
+
+      return result({
+        deleted: true,
+        browserClosed,
+        providerConnectionsDeleted: true,
+        tenantAuditAndRateDataDeleted: true,
+        githubTokenDeleted: authDeletion.githubTokenDeleted,
+        oauthGrantsRevoked: authDeletion.revokedGrants,
+        note: "This access token may stop working immediately after this response because its grant was revoked.",
+      });
+    },
   );
 
   registerTool(
@@ -2136,8 +2222,8 @@ const PRIVACY_HTML = `
 <h2>Data we process</h2><p>We process the account identity, repository or project information, tool inputs, and provider authorization tokens required to perform requested actions. Provider tokens remain server-side and are not intentionally returned in MCP tool output. Browser sessions are isolated per tenant.</p>
 <h2>Storage and retention</h2><p>Provider connection data is kept in tenant-specific Cloudflare storage. Action audit records contain action names and timestamps, not secret values or tool payloads, and are retained for up to 30 days. Short-lived OAuth and secure-entry state expires automatically.</p>
 <h2>Sharing</h2><p>Data is sent only to services the user connects or websites the user asks the browser to access, as needed to perform requested actions. We do not sell user data.</p>
-<h2>Controls</h2><p>Users can disconnect supported providers, close browser sessions, and revoke provider authorization at the provider. Sensitive values such as Worker secret contents are entered through dedicated secure pages rather than normal ChatGPT tool inputs.</p>
-<h2>Contact</h2><p>For privacy questions or deletion requests, use the project support page.</p>`;
+<h2>Controls</h2><p>Users can disconnect supported providers, close browser sessions, revoke provider authorization at the provider, or use the authenticated <strong>Delete My Ravi Developer Agent Data</strong> action to erase Ravi Developer Agent's tenant-stored provider connections, browser-session state, audit/rate records, GitHub user-token state, and OAuth grants. Sensitive values such as Worker secret contents are entered through dedicated secure app flows rather than normal ChatGPT tool inputs.</p>
+<h2>Contact</h2><p>For privacy questions, use the project support page. Authenticated users can perform self-service deletion with the Delete My Ravi Developer Agent Data action.</p>`;
 
 const TERMS_HTML = `
 <p>By using Ravi Developer Agent, you authorize it to perform only the actions you request through accounts you are permitted to use.</p>
