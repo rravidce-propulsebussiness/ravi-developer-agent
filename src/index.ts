@@ -18,7 +18,14 @@ type AuthProps = {
 type Env = {
   BROWSER?: Fetcher;
   BROWSER_SESSIONS: DurableObjectNamespace<TenantBrowserSession>;
+  PROVIDER_CONNECTIONS: DurableObjectNamespace<TenantConnections>;
+  OAUTH_CONNECT_STATE: DurableObjectNamespace<OAuthConnectState>;
   AUTH_SERVER: AuthorizationServerBinding<AuthProps>;
+  CONNECTION_ENCRYPTION_KEY?: string;
+  CLOUDFLARE_OAUTH_CLIENT_ID?: string;
+  CLOUDFLARE_OAUTH_CLIENT_SECRET?: string;
+  SUPABASE_OAUTH_CLIENT_ID?: string;
+  SUPABASE_OAUTH_CLIENT_SECRET?: string;
 };
 
 export class TenantBrowserSession extends DurableObject<Env> {
@@ -39,6 +46,62 @@ export class TenantBrowserSession extends DurableObject<Env> {
     if (request.method === "DELETE" && url.pathname === "/session") {
       await this.ctx.storage.delete(["sessionId", "allowedDomains"]);
       return Response.json({ ok: true });
+    }
+    return new Response("not_found", { status: 404 });
+  }
+}
+
+type ProviderName = "cloudflare" | "supabase";
+type EncryptedConnection = { iv: string; ciphertext: string; updatedAt: number };
+
+export class TenantConnections extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const provider = url.pathname.split("/").filter(Boolean)[1] as ProviderName | undefined;
+    if (!provider || !["cloudflare", "supabase"].includes(provider)) {
+      return new Response("invalid_provider", { status: 400 });
+    }
+    const key = "provider:" + provider;
+    if (request.method === "PUT") {
+      const body = await request.json() as EncryptedConnection;
+      if (!body.iv || !body.ciphertext || !body.updatedAt) return new Response("invalid_connection", { status: 400 });
+      await this.ctx.storage.put(key, body);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "GET") {
+      const value = await this.ctx.storage.get<EncryptedConnection>(key);
+      return value ? Response.json(value) : new Response("connection_not_found", { status: 404 });
+    }
+    if (request.method === "DELETE") {
+      await this.ctx.storage.delete(key);
+      return Response.json({ ok: true });
+    }
+    return new Response("method_not_allowed", { status: 405 });
+  }
+}
+
+type OAuthConnectStateRecord = {
+  tenantId: string;
+  provider: ProviderName;
+  verifier: string;
+  createdAt: number;
+};
+
+export class OAuthConnectState extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "PUT" && url.pathname === "/state") {
+      const body = await request.json() as OAuthConnectStateRecord;
+      if (!body.tenantId || !body.provider || !body.verifier || !body.createdAt) return new Response("invalid_state", { status: 400 });
+      await this.ctx.storage.put("state", body);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/consume") {
+      const body = await this.ctx.storage.get<OAuthConnectStateRecord>("state");
+      if (!body) return new Response("state_not_found", { status: 404 });
+      await this.ctx.storage.delete("state");
+      if (Date.now() - body.createdAt > 10 * 60 * 1000) return new Response("state_expired", { status: 410 });
+      return Response.json(body);
     }
     return new Response("not_found", { status: 404 });
   }
