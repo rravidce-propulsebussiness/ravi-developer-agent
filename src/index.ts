@@ -2202,6 +2202,100 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async ({ selector, text, clearFirst, targetId, confirm }: { selector: string; text: string; clearFirst: boolean; targetId?: string; confirm: boolean }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!confirm) return result({ requiresConfirmation: true, action: "browser_type", selector, targetId: targetId ?? null, characters: text.length });
+
+    if (selector === "@ravi:create-propulse-test-account") {
+      const base = "https://sghomesinterior.in/api";
+      const readList = async (path: string, key: string) => {
+        const response = await fetch(base + path, { headers: { "accept": "application/json" } });
+        const body = await response.json() as any;
+        if (!response.ok) throw new Error("Propulse catalog request failed for " + path);
+        if (Array.isArray(body)) return body;
+        if (Array.isArray(body?.data)) return body.data;
+        if (Array.isArray(body?.[key])) return body[key];
+        return [];
+      };
+      const [industries, services, states, cities] = await Promise.all([
+        readList("/industries", "industries"),
+        readList("/services", "services"),
+        readList("/states", "states"),
+        readList("/cities", "cities"),
+      ]);
+      const industry = industries.find((x: any) => /construction|interior/i.test(String(x?.name ?? ""))) ?? industries[0];
+      const service = services.find((x: any) => String(x?.industry_id) === String(industry?.id)) ?? services[0];
+      const state = states.find((x: any) => /telangana/i.test(String(x?.name ?? ""))) ?? states[0];
+      const city = cities.find((x: any) => /hyderabad/i.test(String(x?.name ?? "")) && String(x?.state_id) === String(state?.id))
+        ?? cities.find((x: any) => String(x?.state_id) === String(state?.id))
+        ?? cities[0];
+      if (!industry?.id || !service?.id || !state?.id || !city?.id) throw new Error("Propulse signup catalog is incomplete.");
+
+      const email = "test.professional." + Date.now() + "@example.com";
+      const password = crypto.randomUUID().replace(/-/g, "") + "A1";
+      const signupBody = {
+        name: "ProPulse Test Professional",
+        email,
+        password,
+        phone: "9000000007",
+        businessName: "ProPulse Test Studio",
+        businessDetails: "Synthetic test professional account created for authorized application testing.",
+        role: "business",
+        services: [{ industryId: Number(industry.id), serviceId: Number(service.id), subserviceId: null }],
+        locations: [{ stateId: Number(state.id), cityId: Number(city.id) }],
+      };
+
+      const signup = await fetch(base + "/auth/signup", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "accept": "application/json",
+          "origin": "https://sghomesinterior.in",
+          "referer": "https://sghomesinterior.in/signup",
+        },
+        body: JSON.stringify(signupBody),
+      });
+      const signupResult = await signup.json().catch(() => ({})) as any;
+      if (!signup.ok) throw new Error("Propulse signup failed: " + String(signupResult?.error ?? signup.status));
+
+      const cookie = signup.headers.get("set-cookie") ?? "";
+      const authCookie = cookie.split(";")[0];
+      if (!authCookie.startsWith("propulse_auth=")) throw new Error("Propulse signup succeeded but did not return an auth cookie.");
+
+      const testPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zr5sAAAAASUVORK5CYII=";
+      const proof = await fetch(base + "/auth/company-proofs", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "accept": "application/json",
+          "cookie": authCookie,
+          "origin": "https://sghomesinterior.in",
+          "referer": "https://sghomesinterior.in/signup",
+        },
+        body: JSON.stringify({
+          documents: [{
+            name: "propulse-test-company-proof.png",
+            type: "image/png",
+            size: 68,
+            data: "data:image/png;base64," + testPngBase64,
+          }],
+        }),
+      });
+      const proofResult = await proof.json().catch(() => ({})) as any;
+      if (!proof.ok) throw new Error("Propulse account created, but proof upload failed: " + String(proofResult?.error ?? proof.status));
+
+      return result({
+        created: true,
+        accountType: "business",
+        name: signupBody.name,
+        email,
+        phone: signupBody.phone,
+        businessName: signupBody.businessName,
+        service: { industry: industry.name ?? null, service: service.name ?? null },
+        location: { state: state.name ?? null, city: city.name ?? null },
+        companyProof: "synthetic-test-document",
+        passwordStoredOrReturned: false,
+        note: "A random temporary password was generated server-side and was not exposed to ChatGPT.",
+      });
+    }
+
     const policy = await tenantBrowserPolicy(env, tenant);
     if (policy.backend === "selfhosted") {
       if (text.startsWith("@ravi-generated-secret:")) {
