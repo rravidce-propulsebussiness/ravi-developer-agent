@@ -48,8 +48,11 @@ GitHub provider tokens are kept inside OAuth token properties and are not emitte
 - Session-level hostname allowlists enforced by Cloudflare.
 - Multiple tabs, activation, closure, page text and screenshots.
 - Approval-gated click/type/select/key interactions.
-- Password, API-key, MFA/OTP, token/secret and payment-card fields are blocked from agent typing.
-- Short-lived read-only Live View in the MCP Apps UI. Interactive credential entry is intentionally unsupported.
+- Normal browser typing still blocks password, API-key, MFA/OTP, token/secret and payment-card fields.
+- Optional self-hosted persistent browser profiles can retain provider login cookies/site storage across sessions.
+- Optional runner-side secret aliases can fill approved password or environment-secret fields without sending the secret value to ChatGPT.
+- Guarded file uploads are supported on the self-hosted runner.
+- Short-lived read-only Live View is available inline in ChatGPT.
 
 ## Security model
 
@@ -173,3 +176,29 @@ SELF_HOSTED_BROWSER_TOKEN=<same token from runner/.env>
 After redeploying, `browser_session_start` prefers the self-hosted runner. If it is unavailable and Cloudflare Browser Run is bound, the tool falls back automatically.
 
 The public browser tool names do not change, so existing ChatGPT workflows continue to use `browser_session_start`, `browser_tab_open`, `browser_screenshot`, `browser_page_text`, `browser_click`, `browser_type`, and `browser_live_view`.
+
+## Persistent authenticated browser profiles
+
+On the self-hosted runner, start a browser session with a `profileName` such as `hostinger`. The runner can load and save cookies/local storage in `BROWSER_PROFILE_DIR` so a provider-controlled sign-in can survive browser restarts without sending the password to ChatGPT.
+
+For Hostinger, a typical allowed-domain policy can include `hostinger.com` and `*.hostinger.com`. Complete the first sign-in in the visible local Chromium window, then call `browser_profile_save`. Future sessions using the same profile name can reuse the authenticated state while it remains valid.
+
+Profile files contain authenticated browser state. They are ignored by Git and should be protected like a normal browser profile.
+
+## Runner-side secret aliases
+
+For a field that must receive a password or another secret, keep the value only on the self-hosted runner. On Windows:
+
+```powershell
+cd runner
+.\set-browser-secret-windows.ps1 -Name HOSTINGER_PASSWORD
+.\start-windows.ps1
+```
+
+The helper stores the local key as `BROWSER_SECRET_HOSTINGER_PASSWORD` inside the ignored `runner/.env` file and never prints the entered value. ChatGPT can list only alias names with `browser_vault_names` and can inject an alias into an approved field with `browser_fill_secret`; the secret value is never returned by the runner or included in audit payloads.
+
+This same pattern can be used for provider environment-secret values. Non-secret environment values can continue to use ordinary browser typing. OTP/MFA values are intentionally not stored in the runner vault.
+
+## Browser file uploads
+
+`browser_upload_files` can attach up to eight files (maximum 5 MB each) to a browser file input on the self-hosted runner after confirmation. This is useful for authorized test flows and provider dashboards that require a file upload.
