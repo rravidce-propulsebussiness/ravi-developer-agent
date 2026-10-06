@@ -12,6 +12,7 @@ type AuthProps = {
   subject: string;
   loginProvider: "github";
   login: string;
+  githubToken: string;
 };
 
 type Env = {
@@ -48,6 +49,7 @@ type TenantContext = {
   subject: string;
   login: string;
   scopes: string[];
+  githubToken: string;
 };
 
 const RESOURCE_METADATA_URL = "https://ravi-developer-agent.rvrmvth.workers.dev/.well-known/oauth-protected-resource/mcp";
@@ -75,6 +77,47 @@ function safeTab(value: unknown) {
 function result(data: unknown) {
   const text = JSON.stringify(data);
   return { structuredContent: data as Record<string, unknown>, content: [{ type: "text" as const, text }] };
+}
+
+function githubHeaders(tenant: TenantContext): HeadersInit {
+  return {
+    accept: "application/vnd.github+json",
+    authorization: `Bearer ${tenant.githubToken}`,
+    "user-agent": "ravi-developer-agent",
+    "x-github-api-version": "2022-11-28",
+  };
+}
+
+async function githubFetch(tenant: TenantContext, path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(githubHeaders(tenant));
+  for (const [key, value] of new Headers(init.headers)) headers.set(key, value);
+  return fetch("https://api.github.com" + path, { ...init, headers });
+}
+
+async function githubJson<T>(tenant: TenantContext, path: string, init: RequestInit = {}): Promise<T> {
+  const response = await githubFetch(tenant, path, init);
+  if (!response.ok) throw new Error(`GitHub request failed (${response.status}).`);
+  return response.json() as Promise<T>;
+}
+
+function encodeRepoPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  if (!parts.length || parts.some((part) => part === "." || part === "..")) throw new Error("Invalid repository path.");
+  return parts.map(encodeURIComponent).join("/");
+}
+
+function encodeUtf8Base64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodeUtf8Base64(value: string): string {
+  const normalized = value.replace(/\s/g, "");
+  const binary = atob(normalized);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
 }
 
 type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
@@ -158,7 +201,7 @@ function createServer(tenant: TenantContext, env: Env) {
       transport: "MCP Streamable HTTP",
       tenant: tenant.tenantId,
       authentication: "oauth-2.1",
-      providers: [],
+      providers: ["github"],
     }),
   );
 
@@ -203,8 +246,231 @@ function createServer(tenant: TenantContext, env: Env) {
         "deploy",
         "verify in isolated browser",
       ],
-      status: "planning-only",
+      status: "ready-for-approved-actions",
     }),
+  );
+
+  registerTool(
+    "github_connection_status",
+    {
+      title: "GitHub Connection",
+      description: "Check whether GitHub is connected for the authenticated Ravi Developer Agent user.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => result({
+      provider: "github",
+      connected: true,
+      login: tenant.login,
+      tenant: tenant.tenantId,
+    }),
+  );
+
+  registerTool(
+    "github_list_repositories",
+    {
+      title: "List GitHub Repositories",
+      description: "List repositories visible to the authenticated GitHub account.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        visibility: z.enum(["all", "public", "private"]).default("all"),
+      },
+    },
+    async ({ visibility }: { visibility: "all" | "public" | "private" }) => {
+      const query = new URLSearchParams({
+        per_page: "100",
+        sort: "updated",
+        affiliation: "owner,collaborator,organization_member",
+        visibility,
+      });
+      const repos = await githubJson<Array<{
+        full_name: string;
+        private: boolean;
+        default_branch: string;
+        permissions?: { admin?: boolean; push?: boolean; pull?: boolean };
+        updated_at?: string;
+      }>>(tenant, "/user/repos?" + query.toString());
+      return result({
+        provider: "github",
+        repositories: repos.map((repo) => ({
+          fullName: repo.full_name,
+          private: repo.private,
+          defaultBranch: repo.default_branch,
+          permissions: repo.permissions ?? null,
+          updatedAt: repo.updated_at ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "github_get_file",
+    {
+      title: "Read GitHub File",
+      description: "Read a UTF-8 text file from a repository visible to the connected GitHub account.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        owner: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        repo: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        path: z.string().min(1).max(1024),
+        ref: z.string().min(1).max(255).optional(),
+      },
+    },
+    async ({ owner, repo, path, ref }: { owner: string; repo: string; path: string; ref?: string }) => {
+      const query = ref ? "?ref=" + encodeURIComponent(ref) : "";
+      const file = await githubJson<{
+        type?: string;
+        name?: string;
+        path?: string;
+        sha?: string;
+        size?: number;
+        encoding?: string;
+        content?: string;
+        html_url?: string;
+      }>(tenant, "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) + "/contents/" + encodeRepoPath(path) + query);
+      if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
+        throw new Error("GitHub path is not a readable UTF-8 file.");
+      }
+      if ((file.size ?? 0) > 750000) throw new Error("File is too large for an inline tool result.");
+      return result({
+        repository: owner + "/" + repo,
+        path: file.path ?? path,
+        sha: file.sha ?? null,
+        size: file.size ?? null,
+        content: decodeUtf8Base64(file.content),
+        htmlUrl: file.html_url ?? null,
+      });
+    },
+  );
+
+  registerTool(
+    "github_create_branch",
+    {
+      title: "Create GitHub Branch",
+      description: "Create a branch from an existing branch after explicit confirmation.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: {
+        owner: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        repo: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        branch: z.string().min(1).max(255),
+        fromBranch: z.string().min(1).max(255).default("main"),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ owner, repo, branch, fromBranch, confirm }: { owner: string; repo: string; branch: string; fromBranch: string; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "create_branch", repository: owner + "/" + repo, branch, fromBranch });
+      const base = await githubJson<{ object?: { sha?: string } }>(
+        tenant,
+        "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) + "/git/ref/heads/" + encodeURIComponent(fromBranch),
+      );
+      const sha = base.object?.sha;
+      if (!sha) throw new Error("Base branch commit could not be resolved.");
+      const created = await githubJson<{ ref?: string; object?: { sha?: string } }>(
+        tenant,
+        "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) + "/git/refs",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ref: "refs/heads/" + branch, sha }),
+        },
+      );
+      return result({ repository: owner + "/" + repo, branch: created.ref ?? "refs/heads/" + branch, sha: created.object?.sha ?? sha });
+    },
+  );
+
+  registerTool(
+    "github_put_file",
+    {
+      title: "Create or Update GitHub File",
+      description: "Create or replace a UTF-8 repository file on a branch after explicit confirmation.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: {
+        owner: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        repo: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        path: z.string().min(1).max(1024),
+        branch: z.string().min(1).max(255),
+        message: z.string().min(1).max(500),
+        content: z.string().max(500000),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ owner, repo, path, branch, message, content, confirm }: { owner: string; repo: string; path: string; branch: string; message: string; content: string; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "put_file", repository: owner + "/" + repo, path, branch, bytes: new TextEncoder().encode(content).length });
+
+      const apiPath = "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) + "/contents/" + encodeRepoPath(path);
+      const existingResponse = await githubFetch(tenant, apiPath + "?ref=" + encodeURIComponent(branch));
+      let sha: string | undefined;
+      if (existingResponse.ok) {
+        const existing = await existingResponse.json() as { sha?: string; type?: string };
+        if (existing.type && existing.type !== "file") throw new Error("Target path is not a file.");
+        sha = existing.sha;
+      } else if (existingResponse.status !== 404) {
+        throw new Error(`GitHub lookup failed (${existingResponse.status}).`);
+      }
+
+      const body: Record<string, unknown> = {
+        message,
+        content: encodeUtf8Base64(content),
+        branch,
+      };
+      if (sha) body.sha = sha;
+
+      const saved = await githubJson<{
+        content?: { path?: string; sha?: string; html_url?: string };
+        commit?: { sha?: string; html_url?: string };
+      }>(tenant, apiPath, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      return result({
+        repository: owner + "/" + repo,
+        path: saved.content?.path ?? path,
+        fileSha: saved.content?.sha ?? null,
+        commitSha: saved.commit?.sha ?? null,
+        commitUrl: saved.commit?.html_url ?? null,
+      });
+    },
+  );
+
+  registerTool(
+    "github_create_pull_request",
+    {
+      title: "Create GitHub Pull Request",
+      description: "Open a pull request after explicit confirmation.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: {
+        owner: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        repo: z.string().regex(/^[A-Za-z0-9_.-]+$/),
+        title: z.string().min(1).max(256),
+        body: z.string().max(20000).default(""),
+        head: z.string().min(1).max(255),
+        base: z.string().min(1).max(255).default("main"),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ owner, repo, title, body, head, base, confirm }: { owner: string; repo: string; title: string; body: string; head: string; base: string; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "create_pull_request", repository: owner + "/" + repo, title, head, base });
+      const pull = await githubJson<{ number?: number; html_url?: string; state?: string }>(
+        tenant,
+        "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) + "/pulls",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title, body, head, base }),
+        },
+      );
+      return result({ repository: owner + "/" + repo, number: pull.number ?? null, url: pull.html_url ?? null, state: pull.state ?? null });
+    },
   );
 
   registerTool(
@@ -483,6 +749,7 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
         subject: ctx.props.subject,
         login: ctx.props.login,
         scopes: ctx.auth.scope,
+        githubToken: ctx.props.githubToken,
       };
       const mcp = createMcpHandler(() => createServer(tenant, env), { route: "/mcp" });
       return mcp(request, env, ctx);
