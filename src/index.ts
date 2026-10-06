@@ -1411,20 +1411,23 @@ function createServer(tenant: TenantContext, env: Env) {
   );
 
   registerTool(
-    "supabase_execute_sql_readonly",
+    "supabase_schema_inspect",
     {
-      title: "Run Supabase Read-only SQL",
-      description: "Execute a read-only SQL query against a connected Supabase project through the Management API.",
+      title: "Inspect Supabase Schema",
+      description: "Read table and column metadata for one schema in a connected Supabase project. This tool does not return application table rows.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: {
         projectRef: z.string().regex(/^[a-z0-9]{20}$/),
-        query: z.string().min(1).max(100000),
-        parameters: z.array(z.unknown()).max(100).optional(),
+        schema: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default("public"),
       },
     },
-    async ({ projectRef, query, parameters }: { projectRef: string; query: string; parameters?: unknown[] }) => {
+    async ({ projectRef, schema }: { projectRef: string; schema: string }) => {
       const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const query =
+        "select table_schema, table_name, column_name, data_type, is_nullable, ordinal_position " +
+        "from information_schema.columns where table_schema = '" + schema + "' " +
+        "order by table_name, ordinal_position";
       const response = await fetch(
         "https://api.supabase.com/v1/projects/" + encodeURIComponent(projectRef) + "/database/query",
         {
@@ -1434,11 +1437,11 @@ function createServer(tenant: TenantContext, env: Env) {
             accept: "application/json",
             "content-type": "application/json",
           },
-          body: JSON.stringify({ query, parameters: parameters ?? [], read_only: true }),
+          body: JSON.stringify({ query, read_only: true }),
         },
       );
-      if (!response.ok) throw new Error("Supabase read-only SQL failed (" + response.status + ").");
-      return result({ provider: "supabase", projectRef, rows: await response.json() });
+      if (!response.ok) throw new Error("Supabase schema inspection failed (" + response.status + ").");
+      return result({ provider: "supabase", projectRef, schema, columns: await response.json() });
     },
   );
 
