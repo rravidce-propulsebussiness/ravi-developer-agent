@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "ravi-developer-agent",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "A tenant-isolated developer agent for GitHub, Cloudflare, Supabase, deployment workflows, and secure cloud-browser testing.",
   "author": {
     "name": "Ravi Developer Agent",
@@ -96,7 +96,7 @@
         "commerce": false
       },
       "publication": {
-        "release_notes": "Initial packaged release of the tenant-isolated GitHub, Cloudflare, Supabase, and secure cloud-browser developer agent."
+        "release_notes": "Public-review hardening: verified-email UserInfo support, accurate MCP tool annotations, minimized internal identifiers, OAuth step-up challenges, and stable UI-origin metadata."
       }
     }
   }
