@@ -74,6 +74,32 @@ function createServer(tenant: TenantContext) {
     }),
   );
 
+  server.registerTool(
+    "browser_capabilities",
+    {
+      title: "Browser Capabilities",
+      description: "Describe the isolated cloud-browser capabilities available to this tenant. This tool does not navigate or modify websites.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => result({
+      tenant: tenant.tenantId,
+      provider: "Cloudflare Browser Run",
+      capabilities: [
+        "persistent browser sessions",
+        "multiple tabs",
+        "page navigation",
+        "screenshots and snapshots",
+        "DOM/accessibility inspection",
+        "console and network inspection via CDP",
+        "live view and human takeover",
+      ],
+      isolation: "per-tenant browser context/session required",
+      navigationEnabled: false,
+      reason: "Browser binding and approval-gated navigation tools are not deployed yet.",
+    }),
+  );
+
   return server;
 }
 
