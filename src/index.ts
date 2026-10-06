@@ -18,7 +18,14 @@ type AuthProps = {
 type Env = {
   BROWSER?: Fetcher;
   BROWSER_SESSIONS: DurableObjectNamespace<TenantBrowserSession>;
+  PROVIDER_CONNECTIONS: DurableObjectNamespace<TenantConnections>;
+  OAUTH_CONNECT_STATE: DurableObjectNamespace<OAuthConnectState>;
   AUTH_SERVER: AuthorizationServerBinding<AuthProps>;
+  CONNECTION_ENCRYPTION_KEY?: string;
+  CLOUDFLARE_OAUTH_CLIENT_ID?: string;
+  CLOUDFLARE_OAUTH_CLIENT_SECRET?: string;
+  SUPABASE_OAUTH_CLIENT_ID?: string;
+  SUPABASE_OAUTH_CLIENT_SECRET?: string;
 };
 
 export class TenantBrowserSession extends DurableObject<Env> {
@@ -39,6 +46,62 @@ export class TenantBrowserSession extends DurableObject<Env> {
     if (request.method === "DELETE" && url.pathname === "/session") {
       await this.ctx.storage.delete(["sessionId", "allowedDomains"]);
       return Response.json({ ok: true });
+    }
+    return new Response("not_found", { status: 404 });
+  }
+}
+
+type ProviderName = "cloudflare" | "supabase";
+type EncryptedConnection = { iv: string; ciphertext: string; updatedAt: number };
+
+export class TenantConnections extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const provider = url.pathname.split("/").filter(Boolean)[1] as ProviderName | undefined;
+    if (!provider || !["cloudflare", "supabase"].includes(provider)) {
+      return new Response("invalid_provider", { status: 400 });
+    }
+    const key = "provider:" + provider;
+    if (request.method === "PUT") {
+      const body = await request.json() as EncryptedConnection;
+      if (!body.iv || !body.ciphertext || !body.updatedAt) return new Response("invalid_connection", { status: 400 });
+      await this.ctx.storage.put(key, body);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "GET") {
+      const value = await this.ctx.storage.get<EncryptedConnection>(key);
+      return value ? Response.json(value) : new Response("connection_not_found", { status: 404 });
+    }
+    if (request.method === "DELETE") {
+      await this.ctx.storage.delete(key);
+      return Response.json({ ok: true });
+    }
+    return new Response("method_not_allowed", { status: 405 });
+  }
+}
+
+type OAuthConnectStateRecord = {
+  tenantId: string;
+  provider: ProviderName;
+  verifier: string;
+  createdAt: number;
+};
+
+export class OAuthConnectState extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "PUT" && url.pathname === "/state") {
+      const body = await request.json() as OAuthConnectStateRecord;
+      if (!body.tenantId || !body.provider || !body.verifier || !body.createdAt) return new Response("invalid_state", { status: 400 });
+      await this.ctx.storage.put("state", body);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "POST" && url.pathname === "/consume") {
+      const body = await this.ctx.storage.get<OAuthConnectStateRecord>("state");
+      if (!body) return new Response("state_not_found", { status: 404 });
+      await this.ctx.storage.delete("state");
+      if (Date.now() - body.createdAt > 10 * 60 * 1000) return new Response("state_expired", { status: 410 });
+      return Response.json(body);
     }
     return new Response("not_found", { status: 404 });
   }
@@ -118,6 +181,311 @@ function decodeUtf8Base64(value: string): string {
   const binary = atob(normalized);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
   return new TextDecoder().decode(bytes);
+}
+
+
+type ProviderConnection = {
+  accessToken: string;
+  refreshToken?: string;
+  tokenType?: string;
+  scope?: string;
+  expiresAt?: number;
+};
+
+const MAIN_ORIGIN = "https://ravi-developer-agent.rvrmvth.workers.dev";
+const CLOUDFLARE_CALLBACK = MAIN_ORIGIN + "/oauth/cloudflare/callback";
+const SUPABASE_CALLBACK = MAIN_ORIGIN + "/oauth/supabase/callback";
+
+function randomBase64Url(bytesLength = 32): string {
+  const bytes = new Uint8Array(bytesLength);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+async function pkceChallenge(verifier: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  let binary = "";
+  for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function connectionKeyBytes(env: Env): Uint8Array {
+  const value = env.CONNECTION_ENCRYPTION_KEY?.trim();
+  if (!value) throw new Error("Provider connection encryption is not configured.");
+  let bytes: Uint8Array;
+  if (/^[0-9a-f]{64}$/i.test(value)) {
+    bytes = Uint8Array.from(value.match(/.{2}/g)!.map((pair) => parseInt(pair, 16)));
+  } else {
+    try {
+      const binary = atob(value);
+      bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    } catch {
+      throw new Error("Provider connection encryption key is invalid.");
+    }
+  }
+  if (bytes.length !== 32) throw new Error("Provider connection encryption key must be 32 bytes.");
+  return bytes;
+}
+
+function ownedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+async function connectionCryptoKey(env: Env): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", ownedArrayBuffer(connectionKeyBytes(env)), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function encryptConnection(env: Env, tenantId: string, provider: ProviderName, value: ProviderConnection): Promise<EncryptedConnection> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const aad = new TextEncoder().encode(tenantId + ":" + provider);
+  const plaintext = new TextEncoder().encode(JSON.stringify(value));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: aad },
+    await connectionCryptoKey(env),
+    plaintext,
+  );
+  return {
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
+    updatedAt: Date.now(),
+  };
+}
+
+async function decryptConnection(env: Env, tenantId: string, provider: ProviderName, value: EncryptedConnection): Promise<ProviderConnection> {
+  const aad = new TextEncoder().encode(tenantId + ":" + provider);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: ownedArrayBuffer(base64ToBytes(value.iv)), additionalData: aad },
+    await connectionCryptoKey(env),
+    ownedArrayBuffer(base64ToBytes(value.ciphertext)),
+  );
+  return JSON.parse(new TextDecoder().decode(plaintext)) as ProviderConnection;
+}
+
+function providerStore(env: Env, tenantId: string) {
+  return env.PROVIDER_CONNECTIONS.get(env.PROVIDER_CONNECTIONS.idFromName(tenantId));
+}
+
+async function saveProviderConnection(env: Env, tenantId: string, provider: ProviderName, connection: ProviderConnection): Promise<void> {
+  const encrypted = await encryptConnection(env, tenantId, provider, connection);
+  const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(encrypted),
+  });
+  if (!response.ok) throw new Error("Provider connection could not be stored.");
+}
+
+async function providerConnectionExists(env: Env, tenantId: string, provider: ProviderName): Promise<boolean> {
+  const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider);
+  return response.ok;
+}
+
+async function loadProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<ProviderConnection> {
+  const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider);
+  if (!response.ok) throw new Error(provider + " is not connected.");
+  return decryptConnection(env, tenantId, provider, await response.json() as EncryptedConnection);
+}
+
+async function deleteProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<void> {
+  await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider, { method: "DELETE" });
+}
+
+function providerClient(env: Env, provider: ProviderName): { clientId: string; clientSecret: string; callback: string } {
+  if (provider === "cloudflare") {
+    if (!env.CLOUDFLARE_OAUTH_CLIENT_ID || !env.CLOUDFLARE_OAUTH_CLIENT_SECRET) throw new Error("Cloudflare OAuth application is not configured.");
+    return { clientId: env.CLOUDFLARE_OAUTH_CLIENT_ID, clientSecret: env.CLOUDFLARE_OAUTH_CLIENT_SECRET, callback: CLOUDFLARE_CALLBACK };
+  }
+  if (!env.SUPABASE_OAUTH_CLIENT_ID || !env.SUPABASE_OAUTH_CLIENT_SECRET) throw new Error("Supabase OAuth application is not configured.");
+  return { clientId: env.SUPABASE_OAUTH_CLIENT_ID, clientSecret: env.SUPABASE_OAUTH_CLIENT_SECRET, callback: SUPABASE_CALLBACK };
+}
+
+function providerConfigured(env: Env, provider: ProviderName): boolean {
+  try {
+    connectionKeyBytes(env);
+    providerClient(env, provider);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function beginProviderOAuth(env: Env, tenant: TenantContext, provider: ProviderName): Promise<string> {
+  const client = providerClient(env, provider);
+  connectionKeyBytes(env);
+  const state = randomBase64Url(32);
+  const verifier = randomBase64Url(48);
+  const stateId = env.OAUTH_CONNECT_STATE.idFromName(state);
+  const stored = await env.OAUTH_CONNECT_STATE.get(stateId).fetch("https://oauth-connect/state", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tenantId: tenant.tenantId, provider, verifier, createdAt: Date.now() } satisfies OAuthConnectStateRecord),
+  });
+  if (!stored.ok) throw new Error("Provider authorization state could not be stored.");
+
+  const challenge = await pkceChallenge(verifier);
+  if (provider === "cloudflare") {
+    const url = new URL("https://dash.cloudflare.com/oauth2/auth");
+    url.searchParams.set("client_id", client.clientId);
+    url.searchParams.set("redirect_uri", client.callback);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("state", state);
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    url.searchParams.set("scope", "offline_access workers-platform.read workers-platform.write");
+    return url.toString();
+  }
+
+  const url = new URL("https://api.supabase.com/v1/oauth/authorize");
+  url.searchParams.set("client_id", client.clientId);
+  url.searchParams.set("redirect_uri", client.callback);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("state", state);
+  url.searchParams.set("code_challenge", challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  return url.toString();
+}
+
+async function consumeProviderState(env: Env, state: string, provider: ProviderName): Promise<OAuthConnectStateRecord> {
+  if (!/^[A-Za-z0-9_-]{20,200}$/.test(state)) throw new Error("Invalid OAuth state.");
+  const id = env.OAUTH_CONNECT_STATE.idFromName(state);
+  const response = await env.OAUTH_CONNECT_STATE.get(id).fetch("https://oauth-connect/consume", { method: "POST" });
+  if (!response.ok) throw new Error("Provider authorization state is invalid or expired.");
+  const record = await response.json() as OAuthConnectStateRecord;
+  if (record.provider !== provider) throw new Error("Provider authorization state does not match.");
+  return record;
+}
+
+function basicAuth(clientId: string, clientSecret: string): string {
+  return "Basic " + btoa(clientId + ":" + clientSecret);
+}
+
+async function exchangeProviderCode(env: Env, provider: ProviderName, code: string, verifier: string): Promise<ProviderConnection> {
+  const client = providerClient(env, provider);
+  const tokenUrl = provider === "cloudflare"
+    ? "https://dash.cloudflare.com/oauth2/token"
+    : "https://api.supabase.com/v1/oauth/token";
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: basicAuth(client.clientId, client.clientSecret),
+    },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: client.callback,
+      code_verifier: verifier,
+    }),
+  });
+  if (!response.ok) throw new Error("Provider token exchange failed (" + response.status + ").");
+  const token = await response.json() as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    token_type?: string;
+    scope?: string;
+  };
+  if (!token.access_token) throw new Error("Provider did not return an access token.");
+  return {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token,
+    tokenType: token.token_type,
+    scope: token.scope,
+    expiresAt: token.expires_in ? Date.now() + token.expires_in * 1000 : undefined,
+  };
+}
+
+async function refreshProviderConnection(env: Env, tenantId: string, provider: ProviderName, connection: ProviderConnection): Promise<ProviderConnection> {
+  if (!connection.refreshToken || !connection.expiresAt || connection.expiresAt > Date.now() + 60_000) return connection;
+  const client = providerClient(env, provider);
+  const tokenUrl = provider === "cloudflare"
+    ? "https://dash.cloudflare.com/oauth2/token"
+    : "https://api.supabase.com/v1/oauth/token";
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: basicAuth(client.clientId, client.clientSecret),
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: connection.refreshToken,
+    }),
+  });
+  if (!response.ok) throw new Error(provider + " authorization has expired; reconnect the provider.");
+  const token = await response.json() as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    token_type?: string;
+    scope?: string;
+  };
+  if (!token.access_token) throw new Error(provider + " token refresh failed.");
+  const refreshed: ProviderConnection = {
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token ?? connection.refreshToken,
+    tokenType: token.token_type ?? connection.tokenType,
+    scope: token.scope ?? connection.scope,
+    expiresAt: token.expires_in ? Date.now() + token.expires_in * 1000 : connection.expiresAt,
+  };
+  await saveProviderConnection(env, tenantId, provider, refreshed);
+  return refreshed;
+}
+
+async function activeProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<ProviderConnection> {
+  return refreshProviderConnection(env, tenantId, provider, await loadProviderConnection(env, tenantId, provider));
+}
+
+function providerConnectedPage(provider: ProviderName, ok: boolean, message: string): Response {
+  const title = ok ? provider + " connected" : provider + " connection failed";
+  const safeMessage = message.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+  const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title><style>body{font-family:system-ui;background:#101216;color:#f4f6fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:520px;padding:28px;border:1px solid #2b3140;border-radius:18px;background:#181b22}h1{margin-top:0}</style>
+<div class="card"><h1>${ok ? "Connected" : "Connection failed"}</h1><p>${safeMessage}</p><p>You can close this tab and return to ChatGPT.</p></div>`;
+  return new Response(html, {
+    status: ok ? 200 : 400,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
+async function providerOAuthCallback(request: Request, env: Env, provider: ProviderName): Promise<Response> {
+  const url = new URL(request.url);
+  const state = url.searchParams.get("state") ?? "";
+  try {
+    const record = await consumeProviderState(env, state, provider);
+    const error = url.searchParams.get("error");
+    if (error) return providerConnectedPage(provider, false, "Authorization was not completed.");
+    const code = url.searchParams.get("code");
+    if (!code) return providerConnectedPage(provider, false, "Authorization code is missing.");
+    const connection = await exchangeProviderCode(env, provider, code, record.verifier);
+    await saveProviderConnection(env, record.tenantId, provider, connection);
+    return providerConnectedPage(provider, true, provider === "cloudflare" ? "Cloudflare is connected to Ravi Developer Agent." : "Supabase is connected to Ravi Developer Agent.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Provider connection failed.";
+    return providerConnectedPage(provider, false, message);
+  }
 }
 
 type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
@@ -201,7 +569,17 @@ function createServer(tenant: TenantContext, env: Env) {
       transport: "MCP Streamable HTTP",
       tenant: tenant.tenantId,
       authentication: "oauth-2.1",
-      providers: ["github"],
+      providers: {
+        github: { configured: true, connected: true },
+        cloudflare: {
+          configured: providerConfigured(env, "cloudflare"),
+          connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
+        },
+        supabase: {
+          configured: providerConfigured(env, "supabase"),
+          connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
+        },
+      },
     }),
   );
 
@@ -470,6 +848,212 @@ function createServer(tenant: TenantContext, env: Env) {
         },
       );
       return result({ repository: owner + "/" + repo, number: pull.number ?? null, url: pull.html_url ?? null, state: pull.state ?? null });
+    },
+  );
+
+
+  registerTool(
+    "cloudflare_connection_status",
+    {
+      title: "Cloudflare Connection",
+      description: "Check whether Cloudflare OAuth is configured and connected for this tenant.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => result({
+      provider: "cloudflare",
+      configured: providerConfigured(env, "cloudflare"),
+      connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
+      tenant: tenant.tenantId,
+    }),
+  );
+
+  registerTool(
+    "cloudflare_connect",
+    {
+      title: "Connect Cloudflare",
+      description: "Start a secure Cloudflare OAuth connection using PKCE. The user must review and approve Cloudflare's consent screen.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: { confirm: z.boolean().default(false) },
+    },
+    async ({ confirm }: { confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "connect_cloudflare" });
+      if (!providerConfigured(env, "cloudflare")) {
+        return result({
+          provider: "cloudflare",
+          configured: false,
+          message: "Cloudflare OAuth client credentials and provider encryption must be configured by the app owner first.",
+        });
+      }
+      return result({
+        provider: "cloudflare",
+        configured: true,
+        connectUrl: await beginProviderOAuth(env, tenant, "cloudflare"),
+        expiresInSeconds: 600,
+      });
+    },
+  );
+
+  registerTool(
+    "cloudflare_list_accounts",
+    {
+      title: "List Cloudflare Accounts",
+      description: "List Cloudflare accounts authorized for the connected tenant.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch("https://api.cloudflare.com/client/v4/accounts?per_page=50", {
+        headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Cloudflare account listing failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: Array<{ id?: string; name?: string; type?: string }>;
+      };
+      if (body.success === false) throw new Error("Cloudflare account listing failed.");
+      return result({
+        provider: "cloudflare",
+        accounts: (body.result ?? []).map((account) => ({
+          id: account.id ?? null,
+          name: account.name ?? null,
+          type: account.type ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "cloudflare_list_workers",
+    {
+      title: "List Cloudflare Workers",
+      description: "List Worker scripts in an authorized Cloudflare account.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/) },
+    },
+    async ({ accountId }: { accountId: string }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch("https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) + "/workers/scripts", {
+        headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Cloudflare Worker listing failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: Array<{ id?: string; modified_on?: string; created_on?: string }>;
+      };
+      if (body.success === false) throw new Error("Cloudflare Worker listing failed.");
+      return result({
+        provider: "cloudflare",
+        accountId,
+        workers: (body.result ?? []).map((worker) => ({
+          name: worker.id ?? null,
+          createdAt: worker.created_on ?? null,
+          modifiedAt: worker.modified_on ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "supabase_connection_status",
+    {
+      title: "Supabase Connection",
+      description: "Check whether Supabase OAuth is configured and connected for this tenant.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => result({
+      provider: "supabase",
+      configured: providerConfigured(env, "supabase"),
+      connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
+      tenant: tenant.tenantId,
+    }),
+  );
+
+  registerTool(
+    "supabase_connect",
+    {
+      title: "Connect Supabase",
+      description: "Start a secure Supabase Management API OAuth connection using PKCE. The user must review and approve Supabase's consent screen.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: { confirm: z.boolean().default(false) },
+    },
+    async ({ confirm }: { confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "connect_supabase" });
+      if (!providerConfigured(env, "supabase")) {
+        return result({
+          provider: "supabase",
+          configured: false,
+          message: "Supabase OAuth client credentials and provider encryption must be configured by the app owner first.",
+        });
+      }
+      return result({
+        provider: "supabase",
+        configured: true,
+        connectUrl: await beginProviderOAuth(env, tenant, "supabase"),
+        expiresInSeconds: 600,
+      });
+    },
+  );
+
+  registerTool(
+    "supabase_list_projects",
+    {
+      title: "List Supabase Projects",
+      description: "List Supabase projects available to the connected tenant through the Management API.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const response = await fetch("https://api.supabase.com/v1/projects", {
+        headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Supabase project listing failed (" + response.status + ").");
+      const projects = await response.json() as Array<{
+        id?: string;
+        ref?: string;
+        name?: string;
+        region?: string;
+        status?: string;
+        organization_id?: string;
+      }>;
+      return result({
+        provider: "supabase",
+        projects: projects.map((project) => ({
+          id: project.id ?? project.ref ?? null,
+          name: project.name ?? null,
+          region: project.region ?? null,
+          status: project.status ?? null,
+          organizationId: project.organization_id ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "provider_disconnect",
+    {
+      title: "Disconnect Provider",
+      description: "Delete this tenant's locally stored encrypted Cloudflare or Supabase provider connection after explicit confirmation.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: {
+        provider: z.enum(["cloudflare", "supabase"]),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ provider, confirm }: { provider: ProviderName; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "disconnect_provider", provider });
+      await deleteProviderConnection(env, tenant.tenantId, provider);
+      return result({ provider, connected: false, deleted: true });
     },
   );
 
@@ -927,19 +1511,32 @@ export default {
       return Response.json({
         ok: true,
         service: "ravi-developer-agent",
-        version: "0.3.0",
+        version: "0.4.0",
         authentication: "oauth-2.1",
-      });
+        providerOAuth: {
+          encryptionConfigured: Boolean(env.CONNECTION_ENCRYPTION_KEY),
+          cloudflareConfigured: providerConfigured(env, "cloudflare"),
+          supabaseConfigured: providerConfigured(env, "supabase"),
+        },
+      }, { headers: { "cache-control": "no-store" } });
     }
 
     if (url.pathname === "/") {
       return Response.json({
         name: "Ravi Developer Agent",
-        version: "0.3.0",
+        version: "0.4.0",
         mcp: "/mcp",
         health: "/health",
         authentication: "OAuth 2.1 required for MCP",
       });
+    }
+
+    if (url.pathname === "/oauth/cloudflare/callback") {
+      return providerOAuthCallback(request, env, "cloudflare");
+    }
+
+    if (url.pathname === "/oauth/supabase/callback") {
+      return providerOAuthCallback(request, env, "supabase");
     }
 
     if (url.pathname === "/mcp" || url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
