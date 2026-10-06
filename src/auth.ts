@@ -196,7 +196,6 @@ async function githubManifestPage(env: AuthEnv): Promise<Response> {
       metadata: "read",
       contents: "write",
       pull_requests: "write",
-      workflows: "write",
     },
   };
   const safeManifest = escapeHtml(JSON.stringify(manifest));
