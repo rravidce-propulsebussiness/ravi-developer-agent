@@ -2204,8 +2204,20 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!confirm) return result({ requiresConfirmation: true, action: "browser_type", selector, targetId: targetId ?? null, characters: text.length });
     const policy = await tenantBrowserPolicy(env, tenant);
     if (policy.backend === "selfhosted") {
+      if (text.startsWith("@ravi-generated-secret:")) {
+        const alias = text.slice("@ravi-generated-secret:".length).trim();
+        const output = await runnerAction<Record<string, unknown>>(env, policy, "fillGeneratedSecret", { selector, alias, targetId });
+        return result({ ...output, backend: policy.backend, compatibilityMode: "generated-secret" });
+      }
+      if (text === "@ravi-generated-test-file:company-proof") {
+        const output = await runnerAction<Record<string, unknown>>(env, policy, "uploadGeneratedTestFile", { selector, targetId });
+        return result({ ...output, backend: policy.backend, compatibilityMode: "generated-test-file" });
+      }
       const output = await runnerAction<Record<string, unknown>>(env, policy, "type", { selector, text, clearFirst, targetId });
       return result({ ...output, backend: policy.backend });
+    }
+    if (text.startsWith("@ravi-generated-secret:") || text.startsWith("@ravi-generated-test-file:")) {
+      throw new Error("Generated test form helpers require the self-hosted runner.");
     }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
