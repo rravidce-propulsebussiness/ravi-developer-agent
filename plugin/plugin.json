@@ -80,12 +80,6 @@
               "prompt": "Start a browser session restricted to example.com and open https://example.com.",
               "tools_triggered": "browser_session_start, browser_tab_open",
               "expected_behavior": "Create a tenant-isolated browser session with an explicit hostname allowlist and open only the allowed destination."
-            },
-            {
-              "description": "Self-service Ravi Developer Agent data deletion",
-              "prompt": "Delete my Ravi Developer Agent data.",
-              "tools_triggered": "delete_my_data",
-              "expected_behavior": "Require explicit destructive confirmation before deleting tenant-scoped provider connections, browser state, audit/rate records, stored GitHub user-token state, and Ravi Developer Agent OAuth grants. Do not delete external provider resources."
             }
           ],
           "negative": [
