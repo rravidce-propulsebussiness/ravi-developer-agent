@@ -3,6 +3,9 @@
   "name": "ravi-developer-agent-auth",
   "main": "src/auth.ts",
   "compatibility_date": "2026-10-06",
-  "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true }
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": { "enabled": true },
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "defb7e86276c464d8437b417cc1572c3" }
+  ]
 }
