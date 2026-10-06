@@ -247,6 +247,28 @@ async function githubJson<T>(tenant: TenantContext, path: string, init: RequestI
   return response.json() as Promise<T>;
 }
 
+function isSensitiveRepositoryPath(path: string): boolean {
+  const normalized = path.toLowerCase().replace(/\\/g, "/");
+  const base = normalized.split("/").pop() ?? "";
+  if (base === ".env.example" || base === ".env.sample" || base.endsWith(".example")) return false;
+  if (base === ".env" || base.startsWith(".env.") || base === ".npmrc" || base === ".pypirc") return true;
+  if (/^(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/.test(base)) return true;
+  if (normalized.includes("/.ssh/") || normalized.includes("/.aws/") || normalized.includes("/.gnupg/")) return true;
+  return false;
+}
+
+function containsLikelyCredential(value: string): boolean {
+  const checks = [
+    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+    /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+    /\bAKIA[0-9A-Z]{16}\b/,
+    /\bsk-[A-Za-z0-9_-]{20,}\b/,
+    /\b(?:api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|password)\s*[:=]\s*["'][^"'\n]{8,}["']/i,
+  ];
+  return checks.some((pattern) => pattern.test(value));
+}
+
 function encodeRepoPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   if (!parts.length || parts.some((part) => part === "." || part === "..")) throw new Error("Invalid repository path.");
@@ -370,7 +392,7 @@ async function beginProviderOAuth(env: Env, tenant: TenantContext, provider: Pro
     url.searchParams.set("state", state);
     url.searchParams.set("code_challenge", challenge);
     url.searchParams.set("code_challenge_method", "S256");
-    url.searchParams.set("scope", "offline_access account-settings.read workers-scripts.read workers-scripts.write workers-kv-storage.read workers-kv-storage.write d1.read d1.write workers-r2.read workers-r2.write workers-ci.read workers-ci.write browser-rendering.read browser-rendering.write");
+    url.searchParams.set("scope", "offline_access account-settings.read workers-scripts.read workers-scripts.write workers-ci.read workers-ci.write");
     return url.toString();
   }
 
@@ -575,13 +597,34 @@ function createServer(tenant: TenantContext, env: Env) {
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
+  const openWorldTools = new Set([
+    "github_create_branch",
+    "github_put_file",
+    "github_create_pull_request",
+    "cloudflare_trigger_build",
+    "browser_open",
+    "browser_session_start",
+    "browser_tabs",
+    "browser_tab_open",
+    "browser_tab_activate",
+    "browser_tab_close",
+    "browser_session_close",
+    "browser_screenshot",
+    "browser_page_text",
+    "browser_click",
+    "browser_type",
+    "browser_select",
+    "browser_press",
+    "browser_wait",
+    "browser_live_view",
+  ]);
   const registerTool = (name: string, config: any, handler: any) => {
     const normalizedConfig = {
       ...config,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
-        openWorldHint: true,
+        openWorldHint: openWorldTools.has(name),
         ...(config?.annotations ?? {}),
       },
     };
@@ -610,7 +653,6 @@ function createServer(tenant: TenantContext, env: Env) {
       if (!response.ok) throw new Error("Audit history is unavailable.");
       const body = await response.json() as { events?: Array<{ timestamp: number; action: string; subject: string }> };
       return result({
-        tenant: tenant.tenantId,
         retentionDays: 30,
         events: (body.events ?? []).map((event) => ({
           timestamp: new Date(event.timestamp).toISOString(),
@@ -633,7 +675,6 @@ function createServer(tenant: TenantContext, env: Env) {
       service: "Ravi Developer Agent",
       version: "0.6.0",
       transport: "MCP Streamable HTTP",
-      tenant: tenant.tenantId,
       authentication: "oauth-2.1",
       providers: {
         github: { configured: true, connected: true },
@@ -662,7 +703,6 @@ function createServer(tenant: TenantContext, env: Env) {
       id: tenant.subject,
       name: tenant.login,
       provider: "github",
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -679,7 +719,6 @@ function createServer(tenant: TenantContext, env: Env) {
       },
     },
     async ({ task, repository }: { task: string; repository?: string }) => result({
-      tenant: tenant.tenantId,
       task,
       repository: repository ?? null,
       execution: [
@@ -706,7 +745,6 @@ function createServer(tenant: TenantContext, env: Env) {
       provider: "github",
       connected: true,
       login: tenant.login,
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -763,6 +801,7 @@ function createServer(tenant: TenantContext, env: Env) {
       },
     },
     async ({ owner, repo, path, ref }: { owner: string; repo: string; path: string; ref?: string }) => {
+      if (isSensitiveRepositoryPath(path)) throw new Error("Reading credential/config secret files is not supported.");
       const query = ref ? "?ref=" + encodeURIComponent(ref) : "";
       const file = await githubJson<{
         type?: string;
@@ -778,12 +817,14 @@ function createServer(tenant: TenantContext, env: Env) {
         throw new Error("GitHub path is not a readable UTF-8 file.");
       }
       if ((file.size ?? 0) > 750000) throw new Error("File is too large for an inline tool result.");
+      const decoded = decodeUtf8Base64(file.content);
+      if (containsLikelyCredential(decoded)) throw new Error("The requested file appears to contain authentication secrets and cannot be returned through this plugin.");
       return result({
         repository: owner + "/" + repo,
         path: file.path ?? path,
         sha: file.sha ?? null,
         size: file.size ?? null,
-        content: decodeUtf8Base64(file.content),
+        content: decoded,
         htmlUrl: file.html_url ?? null,
       });
     },
@@ -845,6 +886,9 @@ function createServer(tenant: TenantContext, env: Env) {
     },
     async ({ owner, repo, path, branch, message, content, confirm }: { owner: string; repo: string; path: string; branch: string; message: string; content: string; confirm: boolean }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (isSensitiveRepositoryPath(path)) throw new Error("Writing credential/config secret files is not supported.");
+      if (path.toLowerCase().replace(/\\/g, "/").startsWith(".github/workflows/")) throw new Error("Editing GitHub Actions workflow files is not enabled for this plugin.");
+      if (containsLikelyCredential(content)) throw new Error("The proposed file content appears to contain authentication secrets. Store secrets directly with the provider and reference them by environment variable instead.");
       if (!confirm) return result({ requiresConfirmation: true, action: "put_file", repository: owner + "/" + repo, path, branch, bytes: new TextEncoder().encode(content).length });
 
       const apiPath = "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) + "/contents/" + encodeRepoPath(path);
@@ -930,7 +974,6 @@ function createServer(tenant: TenantContext, env: Env) {
       provider: "cloudflare",
       configured: await providerConfigured(env, "cloudflare"),
       connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -1021,195 +1064,6 @@ function createServer(tenant: TenantContext, env: Env) {
           modifiedAt: worker.modified_on ?? null,
         })),
       });
-    },
-  );
-
-  registerAppResource(server, "cloudflare-secret-manager", "ui://ravi-developer-agent/cloudflare-secret-v1.html", {}, async () => ({
-    contents: [{
-      uri: "ui://ravi-developer-agent/cloudflare-secret-v1.html",
-      mimeType: RESOURCE_MIME_TYPE,
-      text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{color-scheme:light dark}*{box-sizing:border-box}body{font-family:system-ui;margin:0;padding:18px;background:transparent}.card{border:1px solid color-mix(in srgb,currentColor 18%,transparent);border-radius:16px;padding:18px;max-width:720px;margin:auto}h2{margin:0 0 8px}.muted{opacity:.7;font-size:.92rem}label{display:block;margin-top:13px;font-weight:650}input{width:100%;margin-top:6px;padding:10px 11px;border-radius:9px;border:1px solid color-mix(in srgb,currentColor 25%,transparent);background:transparent;color:inherit}button{margin-top:18px;padding:10px 15px;border:0;border-radius:9px;font-weight:700;cursor:pointer}.status{margin-top:13px;min-height:1.4em}code{word-break:break-all}</style></head>
-<body><div class="card"><h2>Cloudflare Worker secret</h2><p class="muted">The secret value is sent directly from this UI to the app-only MCP tool. It is not returned in tool output.</p>
-<form id="form">
-<label>Account ID<input id="account" required pattern="[A-Fa-f0-9]{32}" autocomplete="off"></label>
-<label>Worker name<input id="script" required pattern="[a-z0-9_][a-z0-9-_]*" autocomplete="off"></label>
-<label>Secret name<input id="name" required pattern="[A-Za-z_][A-Za-z0-9_]*" autocomplete="off"></label>
-<label>Secret value<input id="value" required type="password" autocomplete="new-password"></label>
-<button id="save" type="submit">Save secret</button>
-<div class="status" id="status"></div></form></div>
-<script>
-const form=document.getElementById("form"), status=document.getElementById("status"), save=document.getElementById("save");
-const account=document.getElementById("account"), script=document.getElementById("script"), name=document.getElementById("name"), value=document.getElementById("value");
-function prefill(v){const x=v?.structuredContent||v||window.openai?.toolOutput||{};if(x.accountId&&!account.value)account.value=x.accountId;if(x.scriptName&&!script.value)script.value=x.scriptName}
-prefill(window.openai?.toolOutput);
-window.addEventListener("message",e=>{if(e.data?.method==="ui/notifications/tool-result")prefill(e.data.params)});
-form.addEventListener("submit",async e=>{
-  e.preventDefault();
-  if(!window.openai?.callTool){status.textContent="This host does not support direct app tool calls.";return}
-  save.disabled=true; status.textContent="Saving…";
-  const secret=value.value;
-  try{
-    const res=await window.openai.callTool("cloudflare_set_worker_secret_ui",{accountId:account.value.trim(),scriptName:script.value.trim(),secretName:name.value.trim(),secretValue:secret});
-    value.value="";
-    const out=res?.structuredContent||res?.content?.[0]?.text||res;
-    status.textContent=typeof out==="string"?out:(out?.saved?"Secret saved.":"Request completed.");
-  }catch(err){status.textContent="Could not save the secret."}
-  finally{save.disabled=false}
-});
-</script></body></html>`,
-      _meta: { ui: { prefersBorder: true } },
-    }],
-  }));
-
-  registerTool(
-    "cloudflare_secret_manager",
-    {
-      title: "Manage Cloudflare Worker Secret",
-      description: "Open a secure app UI for creating or replacing a Cloudflare Worker secret without exposing the secret value to the model.",
-      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
-      inputSchema: {
-        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/).optional(),
-        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/).optional(),
-      },
-      _meta: { ui: { resourceUri: "ui://ravi-developer-agent/cloudflare-secret-v1.html" } },
-    },
-    async ({ accountId, scriptName }: { accountId?: string; scriptName?: string }) => {
-      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
-      return result({ provider: "cloudflare", accountId: accountId ?? null, scriptName: scriptName ?? null, secureEntry: true });
-    },
-  );
-
-  registerTool(
-    "cloudflare_set_worker_secret_ui",
-    {
-      title: "Store Cloudflare Worker Secret",
-      description: "UI-only operation used by the secure secret manager to create or replace one Worker secret. The secret value is never returned.",
-      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: false, destructiveHint: true },
-      inputSchema: {
-        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
-        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
-        secretName: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
-        secretValue: z.string().min(1).max(65536),
-      },
-      _meta: { ui: { visibility: ["app"] } },
-    },
-    async ({ accountId, scriptName, secretName, secretValue }: { accountId: string; scriptName: string; secretName: string; secretValue: string }) => {
-      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
-      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
-      const response = await fetch(
-        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
-          "/workers/scripts/" + encodeURIComponent(scriptName) + "/secrets",
-        {
-          method: "PUT",
-          headers: {
-            authorization: "Bearer " + connection.accessToken,
-            accept: "application/json",
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ name: secretName, type: "secret_text", text: secretValue }),
-        },
-      );
-      if (!response.ok) throw new Error("Cloudflare Worker secret update failed (" + response.status + ").");
-      const body = await response.json() as { success?: boolean };
-      if (body.success === false) throw new Error("Cloudflare Worker secret update failed.");
-      return result({ provider: "cloudflare", accountId, scriptName, secretName, saved: true });
-    },
-  );
-
-  registerAppResource(server, "cloudflare-secret-manager", "ui://ravi-developer-agent/cloudflare-secret-v1.html", {}, async () => ({
-    contents: [{
-      uri: "ui://ravi-developer-agent/cloudflare-secret-v1.html",
-      mimeType: RESOURCE_MIME_TYPE,
-      text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>:root{color-scheme:light dark}*{box-sizing:border-box}body{font-family:system-ui;margin:0;padding:18px;background:transparent}.card{border:1px solid color-mix(in srgb,currentColor 18%,transparent);border-radius:16px;padding:18px;max-width:720px;margin:auto}h2{margin:0 0 8px}.muted{opacity:.7;font-size:.92rem}label{display:block;margin-top:13px;font-weight:650}input{width:100%;margin-top:6px;padding:10px 11px;border-radius:9px;border:1px solid color-mix(in srgb,currentColor 25%,transparent);background:transparent;color:inherit}button{margin-top:18px;padding:10px 15px;border:0;border-radius:9px;font-weight:700;cursor:pointer}.status{margin-top:13px;min-height:1.4em}</style></head>
-<body><div class="card"><h2>Cloudflare Worker secret</h2><p class="muted">The secret value is sent directly from this UI to the app-only MCP tool and is never returned in model-visible output.</p>
-<form id="form">
-<label>Account ID<input id="account" required pattern="[A-Fa-f0-9]{32}" autocomplete="off"></label>
-<label>Worker name<input id="script" required pattern="[a-z0-9_][a-z0-9-_]*" autocomplete="off"></label>
-<label>Secret name<input id="name" required pattern="[A-Za-z_][A-Za-z0-9_]*" autocomplete="off"></label>
-<label>Secret value<input id="value" required type="password" autocomplete="new-password"></label>
-<button id="save" type="submit">Save secret</button><div class="status" id="status"></div></form></div>
-<script>
-const form=document.getElementById("form"),status=document.getElementById("status"),save=document.getElementById("save");
-const account=document.getElementById("account"),script=document.getElementById("script"),name=document.getElementById("name"),value=document.getElementById("value");
-function prefill(v){const x=v?.structuredContent||v||window.openai?.toolOutput||{};if(x.accountId&&!account.value)account.value=x.accountId;if(x.scriptName&&!script.value)script.value=x.scriptName}
-prefill(window.openai?.toolOutput);
-window.addEventListener("message",e=>{if(e.data?.method==="ui/notifications/tool-result")prefill(e.data.params)});
-form.addEventListener("submit",async e=>{
- e.preventDefault();
- if(!window.openai?.callTool){status.textContent="This host does not support direct app tool calls.";return}
- save.disabled=true;status.textContent="Saving…";
- const secret=value.value;
- try{
-  const res=await window.openai.callTool("cloudflare_set_worker_secret_ui",{accountId:account.value.trim(),scriptName:script.value.trim(),secretName:name.value.trim(),secretValue:secret});
-  value.value="";
-  const out=res?.structuredContent||res?.content?.[0]?.text||res;
-  status.textContent=typeof out==="string"?out:(out?.saved?"Secret saved.":"Request completed.");
- }catch{status.textContent="Could not save the secret."}
- finally{save.disabled=false}
-});
-</script></body></html>`,
-      _meta: { ui: { prefersBorder: true } },
-    }],
-  }));
-
-  registerTool(
-    "cloudflare_secret_manager",
-    {
-      title: "Manage Cloudflare Worker Secret",
-      description: "Open a secure app UI for creating or replacing a Cloudflare Worker secret without exposing the secret value to the model.",
-      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
-      inputSchema: {
-        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/).optional(),
-        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/).optional(),
-      },
-      _meta: { ui: { resourceUri: "ui://ravi-developer-agent/cloudflare-secret-v1.html" } },
-    },
-    async ({ accountId, scriptName }: { accountId?: string; scriptName?: string }) => {
-      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
-      return result({ provider: "cloudflare", accountId: accountId ?? null, scriptName: scriptName ?? null, secureEntry: true });
-    },
-  );
-
-  registerTool(
-    "cloudflare_set_worker_secret_ui",
-    {
-      title: "Store Cloudflare Worker Secret",
-      description: "UI-only operation used by the secure secret manager to create or replace one Worker secret. The secret value is never returned.",
-      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-      annotations: { readOnlyHint: false, destructiveHint: true },
-      inputSchema: {
-        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
-        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
-        secretName: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
-        secretValue: z.string().min(1).max(65536),
-      },
-      _meta: { ui: { visibility: ["app"] } },
-    },
-    async ({ accountId, scriptName, secretName, secretValue }: { accountId: string; scriptName: string; secretName: string; secretValue: string }) => {
-      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
-      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
-      const response = await fetch(
-        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
-          "/workers/scripts/" + encodeURIComponent(scriptName) + "/secrets",
-        {
-          method: "PUT",
-          headers: {
-            authorization: "Bearer " + connection.accessToken,
-            accept: "application/json",
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({ name: secretName, type: "secret_text", text: secretValue }),
-        },
-      );
-      if (!response.ok) throw new Error("Cloudflare Worker secret update failed (" + response.status + ").");
-      const body = await response.json() as { success?: boolean };
-      if (body.success === false) throw new Error("Cloudflare Worker secret update failed.");
-      return result({ provider: "cloudflare", accountId, scriptName, secretName, saved: true });
     },
   );
 
@@ -1450,7 +1304,6 @@ form.addEventListener("submit",async e=>{
       provider: "supabase",
       configured: await providerConfigured(env, "supabase"),
       connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -1558,20 +1411,23 @@ form.addEventListener("submit",async e=>{
   );
 
   registerTool(
-    "supabase_execute_sql_readonly",
+    "supabase_schema_inspect",
     {
-      title: "Run Supabase Read-only SQL",
-      description: "Execute a read-only SQL query against a connected Supabase project through the Management API.",
+      title: "Inspect Supabase Schema",
+      description: "Read table and column metadata for one schema in a connected Supabase project. This tool does not return application table rows.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: {
         projectRef: z.string().regex(/^[a-z0-9]{20}$/),
-        query: z.string().min(1).max(100000),
-        parameters: z.array(z.unknown()).max(100).optional(),
+        schema: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default("public"),
       },
     },
-    async ({ projectRef, query, parameters }: { projectRef: string; query: string; parameters?: unknown[] }) => {
+    async ({ projectRef, schema }: { projectRef: string; schema: string }) => {
       const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const query =
+        "select table_schema, table_name, column_name, data_type, is_nullable, ordinal_position " +
+        "from information_schema.columns where table_schema = '" + schema + "' " +
+        "order by table_name, ordinal_position";
       const response = await fetch(
         "https://api.supabase.com/v1/projects/" + encodeURIComponent(projectRef) + "/database/query",
         {
@@ -1581,11 +1437,11 @@ form.addEventListener("submit",async e=>{
             accept: "application/json",
             "content-type": "application/json",
           },
-          body: JSON.stringify({ query, parameters: parameters ?? [], read_only: true }),
+          body: JSON.stringify({ query, read_only: true }),
         },
       );
-      if (!response.ok) throw new Error("Supabase read-only SQL failed (" + response.status + ").");
-      return result({ provider: "supabase", projectRef, rows: await response.json() });
+      if (!response.ok) throw new Error("Supabase schema inspection failed (" + response.status + ").");
+      return result({ provider: "supabase", projectRef, schema, columns: await response.json() });
     },
   );
 
@@ -1605,6 +1461,7 @@ form.addEventListener("submit",async e=>{
     },
     async ({ projectRef, name, query, confirm }: { projectRef: string; name: string; query: string; confirm: boolean }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (containsLikelyCredential(query)) throw new Error("Migration SQL appears to contain authentication secrets. Store secrets with the provider instead of embedding them in SQL.");
       if (!confirm) return result({
         requiresConfirmation: true,
         action: "supabase_apply_migration",
@@ -1679,7 +1536,6 @@ form.addEventListener("submit",async e=>{
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async () => result({
-      tenant: tenant.tenantId,
       provider: "Cloudflare Browser Run",
       capabilities: [
         "persistent tenant browser sessions",
@@ -1704,7 +1560,7 @@ form.addEventListener("submit",async e=>{
     },
     async ({ url }: { url: string }) => {
       const tab = await openTenantTab(env, tenant, url);
-      return result({ tenant: tenant.tenantId, tab });
+      return result({ tab });
     },
   );
   registerTool(
@@ -1737,12 +1593,12 @@ form.addEventListener("submit",async e=>{
         body: JSON.stringify({ sessionId, allowedDomains }),
       });
       if (!stored.ok) throw new Error("Browser session ownership could not be stored.");
-      return result({ tenant: tenant.tenantId, browserReady: true });
+      return result({ browserReady: true });
     },
   );
   registerTool("browser_tabs", {
     title: "List Browser Tabs",
-    description: "List the current pages and live-view metadata in an existing tenant browser session.",
+    description: "List the current pages in the tenant browser session without exposing debugger or Live View credentials.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
@@ -1752,7 +1608,7 @@ form.addEventListener("submit",async e=>{
     const response = await env.BROWSER.fetch(`https://browser-rendering/devtools/browser/${encodeURIComponent(sessionId)}/json/list`);
     if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
     const rawTabs = await response.json() as unknown[];
-    return result({ tenant: tenant.tenantId, tabs: rawTabs.map(safeTab) });
+    return result({ tabs: rawTabs.map(safeTab) });
   });
   registerTool("browser_tab_open", {
     title: "Open Browser Tab",
@@ -1762,7 +1618,7 @@ form.addEventListener("submit",async e=>{
     inputSchema: { url: z.string().url() },
   }, async ({ url }: { url: string }) => {
     const tab = await openTenantTab(env, tenant, url);
-    return result({ tenant: tenant.tenantId, tab });
+    return result({ tab });
   });
 
   registerTool("browser_tab_activate", {
@@ -1778,7 +1634,7 @@ form.addEventListener("submit",async e=>{
       "/json/activate/" + encodeURIComponent(targetId);
     const response = await env.BROWSER.fetch(endpoint);
     if (!response.ok) throw new Error(`Browser tab activation failed (${response.status}).`);
-    return result({ tenant: tenant.tenantId, targetId, active: true });
+    return result({ targetId, active: true });
   });
 
   registerTool("browser_tab_close", {
@@ -1795,7 +1651,7 @@ form.addEventListener("submit",async e=>{
       "/json/close/" + encodeURIComponent(targetId);
     const response = await env.BROWSER.fetch(endpoint);
     if (!response.ok) throw new Error(`Browser tab close failed (${response.status}).`);
-    return result({ tenant: tenant.tenantId, targetId, closed: true });
+    return result({ targetId, closed: true });
   });
 
   registerTool("browser_session_close", {
@@ -1815,7 +1671,7 @@ form.addEventListener("submit",async e=>{
     if (!response.ok && response.status !== 404) throw new Error(`Browser session close failed (${response.status}).`);
     const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
     await env.BROWSER_SESSIONS.get(ownerId).fetch("https://browser-session/session", { method: "DELETE" });
-    return result({ tenant: tenant.tenantId, closed: true });
+    return result({ closed: true });
   });
 
   registerTool("browser_screenshot", {
@@ -1832,7 +1688,7 @@ form.addEventListener("submit",async e=>{
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return {
-        structuredContent: { tenant: tenant.tenantId, targetId: resolvedTargetId, url: page.url() },
+        structuredContent: { targetId: resolvedTargetId, url: page.url() },
         content: [{ type: "image" as const, data: btoa(binary), mimeType: "image/png" }],
       };
     } finally {
@@ -1851,7 +1707,6 @@ form.addEventListener("submit",async e=>{
     try {
       const visibleText = String(await page.evaluate(() => (globalThis as any).document?.body?.innerText ?? ""));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         url: page.url(),
         title: await page.title(),
@@ -1880,7 +1735,6 @@ form.addEventListener("submit",async e=>{
       await page.click(selector);
       await new Promise((resolve) => setTimeout(resolve, 300));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         clicked: true,
         url: page.url(),
@@ -1916,7 +1770,7 @@ form.addEventListener("submit",async e=>{
       }));
       const sensitive = field.type === "password" ||
         /(password|passwd|secret|token|otp|one-time|cc-|card|cvv|cvc)/.test(field.autocomplete + " " + field.name);
-      if (sensitive) throw new Error("Sensitive credential/payment fields must be completed through Interactive Browser Control.");
+      if (sensitive) throw new Error("Sensitive credential, one-time-code, API-key, token, and payment fields are not supported by this plugin. Use an OAuth/provider connection or the service directly.");
       if (clearFirst) {
         await page.$eval(selector, (el: any) => {
           if ("value" in el) {
@@ -1929,7 +1783,6 @@ form.addEventListener("submit",async e=>{
       }
       await page.type(selector, text);
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         typed: true,
         characters: text.length,
@@ -1958,7 +1811,6 @@ form.addEventListener("submit",async e=>{
     try {
       const selected = await page.select(selector, ...values);
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         selected,
         url: page.url(),
@@ -1986,7 +1838,6 @@ form.addEventListener("submit",async e=>{
       await page.keyboard.press(key);
       await new Promise((resolve) => setTimeout(resolve, 200));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         pressed: key,
         url: page.url(),
@@ -2013,7 +1864,6 @@ form.addEventListener("submit",async e=>{
       if (selector) await page.waitForSelector(selector, { timeout: timeoutMs });
       else await new Promise((resolve) => setTimeout(resolve, timeoutMs));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         ready: true,
         url: page.url(),
@@ -2029,39 +1879,13 @@ form.addEventListener("submit",async e=>{
       uri: "ui://ravi-developer-agent/browser-v1.html",
       mimeType: RESOURCE_MIME_TYPE,
       text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params) });apply(window.openai?.toolResponseMetadata);</script></body></html>`,
-      _meta: { ui: { prefersBorder: false, csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
+      _meta: { ui: { prefersBorder: false, domain: "https://ravi-developer-agent.rvrmvth.workers.dev", csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
     }],
   }));
 
-  registerTool("browser_live_control", {
-    title: "Interactive Browser Control",
-    description: "Create a short-lived interactive browser view for secure human takeover, including manual sign-in.",
-    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-    annotations: { readOnlyHint: false, destructiveHint: true },
-    inputSchema: {},
-    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v1.html" } },
-  }, async () => {
-    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
-    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const sessionId = await tenantSessionId(env, tenant);
-    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/live_view";
-    const response = await env.BROWSER.fetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expiresInMs: 300000, mode: "tab" }),
-    });
-    if (!response.ok) throw new Error("Interactive browser view creation failed.");
-    const liveView = await response.json();
-    return {
-      structuredContent: { tenant: tenant.tenantId, browserReady: true, interactive: true },
-      content: [{ type: "text" as const, text: "Interactive browser control is ready for secure human takeover." }],
-      _meta: { liveView },
-    };
-  });
-
   registerTool("browser_live_view", {
     title: "Browser Live View",
-    description: "Create a short-lived read-only live view for an existing browser session.",
+    description: "Create a short-lived read-only live view for an existing browser session. Do not use browser sessions for passwords, API keys, MFA/OTP codes, payment data, or other credentials.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
@@ -2077,7 +1901,7 @@ form.addEventListener("submit",async e=>{
     if (!response.ok) throw new Error("Live view creation failed.");
     const liveView = await response.json();
     return {
-      structuredContent: { tenant: tenant.tenantId, browserReady: true },
+      structuredContent: { browserReady: true },
       content: [{ type: "text" as const, text: "Secure read-only browser view is ready." }],
       _meta: { liveView },
     };
@@ -2136,7 +1960,7 @@ const PRIVACY_HTML = `
 <h2>Data we process</h2><p>We process the account identity, repository or project information, tool inputs, and provider authorization tokens required to perform requested actions. Provider tokens remain server-side and are not intentionally returned in MCP tool output. Browser sessions are isolated per tenant.</p>
 <h2>Storage and retention</h2><p>Provider connection data is kept in tenant-specific Cloudflare storage. Action audit records contain action names and timestamps, not secret values or tool payloads, and are retained for up to 30 days. Short-lived OAuth and secure-entry state expires automatically.</p>
 <h2>Sharing</h2><p>Data is sent only to services the user connects or websites the user asks the browser to access, as needed to perform requested actions. We do not sell user data.</p>
-<h2>Controls</h2><p>Users can disconnect supported providers, close browser sessions, and revoke provider authorization at the provider. Sensitive values such as Worker secret contents are entered through dedicated secure pages rather than normal ChatGPT tool inputs.</p>
+<h2>Controls</h2><p>Users can disconnect supported providers, close browser sessions, and revoke provider authorization at the provider. Ravi Developer Agent does not ask users to enter passwords, API keys, MFA/OTP codes, payment-card data, or other authentication secrets into its tools or browser controls.</p>
 <h2>Contact</h2><p>For privacy questions or deletion requests, use the project support page.</p>`;
 
 const TERMS_HTML = `
