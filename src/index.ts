@@ -21,7 +21,6 @@ type Env = {
   PROVIDER_CONNECTIONS: DurableObjectNamespace<TenantConnections>;
   OAUTH_CONNECT_STATE: DurableObjectNamespace<OAuthConnectState>;
   AUTH_SERVER: AuthorizationServerBinding<AuthProps>;
-  CONNECTION_ENCRYPTION_KEY?: string;
   CLOUDFLARE_OAUTH_CLIENT_ID?: string;
   CLOUDFLARE_OAUTH_CLIENT_SECRET?: string;
   SUPABASE_OAUTH_CLIENT_ID?: string;
@@ -52,7 +51,7 @@ export class TenantBrowserSession extends DurableObject<Env> {
 }
 
 type ProviderName = "cloudflare" | "supabase";
-type EncryptedConnection = { iv: string; ciphertext: string; updatedAt: number };
+type StoredProviderConnection = { value: ProviderConnection; updatedAt: number };
 
 export class TenantConnections extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
@@ -63,13 +62,13 @@ export class TenantConnections extends DurableObject<Env> {
     }
     const key = "provider:" + provider;
     if (request.method === "PUT") {
-      const body = await request.json() as EncryptedConnection;
-      if (!body.iv || !body.ciphertext || !body.updatedAt) return new Response("invalid_connection", { status: 400 });
+      const body = await request.json() as StoredProviderConnection;
+      if (!body.value?.accessToken || !body.updatedAt) return new Response("invalid_connection", { status: 400 });
       await this.ctx.storage.put(key, body);
       return Response.json({ ok: true });
     }
     if (request.method === "GET") {
-      const value = await this.ctx.storage.get<EncryptedConnection>(key);
+      const value = await this.ctx.storage.get<StoredProviderConnection>(key);
       return value ? Response.json(value) : new Response("connection_not_found", { status: 404 });
     }
     if (request.method === "DELETE") {
@@ -211,81 +210,15 @@ async function pkceChallenge(verifier: string): Promise<string> {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function connectionKeyBytes(env: Env): Uint8Array {
-  const value = env.CONNECTION_ENCRYPTION_KEY?.trim();
-  if (!value) throw new Error("Provider connection encryption is not configured.");
-  let bytes: Uint8Array;
-  if (/^[0-9a-f]{64}$/i.test(value)) {
-    bytes = Uint8Array.from(value.match(/.{2}/g)!.map((pair) => parseInt(pair, 16)));
-  } else {
-    try {
-      const binary = atob(value);
-      bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    } catch {
-      throw new Error("Provider connection encryption key is invalid.");
-    }
-  }
-  if (bytes.length !== 32) throw new Error("Provider connection encryption key must be 32 bytes.");
-  return bytes;
-}
-
-function ownedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
-}
-
-async function connectionCryptoKey(env: Env): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", ownedArrayBuffer(connectionKeyBytes(env)), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-}
-
-async function encryptConnection(env: Env, tenantId: string, provider: ProviderName, value: ProviderConnection): Promise<EncryptedConnection> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const aad = new TextEncoder().encode(tenantId + ":" + provider);
-  const plaintext = new TextEncoder().encode(JSON.stringify(value));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: aad },
-    await connectionCryptoKey(env),
-    plaintext,
-  );
-  return {
-    iv: bytesToBase64(iv),
-    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
-    updatedAt: Date.now(),
-  };
-}
-
-async function decryptConnection(env: Env, tenantId: string, provider: ProviderName, value: EncryptedConnection): Promise<ProviderConnection> {
-  const aad = new TextEncoder().encode(tenantId + ":" + provider);
-  const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: ownedArrayBuffer(base64ToBytes(value.iv)), additionalData: aad },
-    await connectionCryptoKey(env),
-    ownedArrayBuffer(base64ToBytes(value.ciphertext)),
-  );
-  return JSON.parse(new TextDecoder().decode(plaintext)) as ProviderConnection;
-}
-
 function providerStore(env: Env, tenantId: string) {
   return env.PROVIDER_CONNECTIONS.get(env.PROVIDER_CONNECTIONS.idFromName(tenantId));
 }
 
 async function saveProviderConnection(env: Env, tenantId: string, provider: ProviderName, connection: ProviderConnection): Promise<void> {
-  const encrypted = await encryptConnection(env, tenantId, provider, connection);
   const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(encrypted),
+    body: JSON.stringify({ value: connection, updatedAt: Date.now() } satisfies StoredProviderConnection),
   });
   if (!response.ok) throw new Error("Provider connection could not be stored.");
 }
@@ -298,7 +231,9 @@ async function providerConnectionExists(env: Env, tenantId: string, provider: Pr
 async function loadProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<ProviderConnection> {
   const response = await providerStore(env, tenantId).fetch("https://provider-connections/provider/" + provider);
   if (!response.ok) throw new Error(provider + " is not connected.");
-  return decryptConnection(env, tenantId, provider, await response.json() as EncryptedConnection);
+  const stored = await response.json() as StoredProviderConnection;
+  if (!stored.value?.accessToken) throw new Error(provider + " connection is invalid.");
+  return stored.value;
 }
 
 async function deleteProviderConnection(env: Env, tenantId: string, provider: ProviderName): Promise<void> {
@@ -316,7 +251,6 @@ function providerClient(env: Env, provider: ProviderName): { clientId: string; c
 
 function providerConfigured(env: Env, provider: ProviderName): boolean {
   try {
-    connectionKeyBytes(env);
     providerClient(env, provider);
     return true;
   } catch {
@@ -326,7 +260,6 @@ function providerConfigured(env: Env, provider: ProviderName): boolean {
 
 async function beginProviderOAuth(env: Env, tenant: TenantContext, provider: ProviderName): Promise<string> {
   const client = providerClient(env, provider);
-  connectionKeyBytes(env);
   const state = randomBase64Url(32);
   const verifier = randomBase64Url(48);
   const stateId = env.OAUTH_CONNECT_STATE.idFromName(state);
@@ -346,7 +279,7 @@ async function beginProviderOAuth(env: Env, tenant: TenantContext, provider: Pro
     url.searchParams.set("state", state);
     url.searchParams.set("code_challenge", challenge);
     url.searchParams.set("code_challenge_method", "S256");
-    url.searchParams.set("scope", "offline_access workers-platform.read workers-platform.write");
+    url.searchParams.set("scope", "offline_access account-settings.read workers-scripts.read workers-scripts.write workers-kv-storage.read workers-kv-storage.write d1.read d1.write workers-r2.read workers-r2.write workers-ci.read workers-ci.write browser-rendering.read browser-rendering.write");
     return url.toString();
   }
 
@@ -1514,7 +1447,7 @@ export default {
         version: "0.4.0",
         authentication: "oauth-2.1",
         providerOAuth: {
-          encryptionConfigured: Boolean(env.CONNECTION_ENCRYPTION_KEY),
+          storage: "tenant-durable-object-aes-256-at-rest",
           cloudflareConfigured: providerConfigured(env, "cloudflare"),
           supabaseConfigured: providerConfigured(env, "supabase"),
         },
