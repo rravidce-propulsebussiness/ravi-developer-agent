@@ -30,3 +30,7 @@ Public distribution requires per-user authentication, provider OAuth, encrypted 
 ## Deployment
 
 Production is built from `main` by the dedicated Cloudflare Worker `ravi-developer-agent`. No other project resources are used.
+
+## Authentication architecture
+
+Authentication uses Cloudflare Workers OAuth Provider v1 with a split authorization/resource-server design. The authorization server is a separate Worker and the MCP Worker validates its tokens through a private Service Binding. Provider credentials and user data must never be stored in unrelated projects. Until the authorization Worker and its dedicated storage are provisioned, the MCP endpoint remains fail-closed.
