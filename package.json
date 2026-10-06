@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy:auth": "wrangler deploy -c wrangler.auth.jsonc",
+    "dev:auth": "wrangler dev -c wrangler.auth.jsonc"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
