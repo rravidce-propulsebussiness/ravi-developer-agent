@@ -217,7 +217,9 @@ function toolAuthRequired(scopes: string[]) {
     isError: true,
     content: [{ type: "text" as const, text: "Additional authorization is required for this action." }],
     _meta: {
-      "mcp/www_authenticate": `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="${scopes.join(" ")}"`,
+      "mcp/www_authenticate": [
+        `Bearer resource_metadata="${RESOURCE_METADATA_URL}", scope="${scopes.join(" ")}", error="insufficient_scope", error_description="Additional authorization is required for this action"`,
+      ],
     },
   };
 }
