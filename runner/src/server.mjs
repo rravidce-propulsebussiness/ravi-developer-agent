@@ -319,6 +319,32 @@ async function performAction(session, body) {
       const visibleText = await page.evaluate(() => document.body?.innerText || "");
       return { ...(await pageMetadata(page, resolvedTargetId)), text: String(visibleText).slice(0, 50000) };
     }
+    if (action === "elements") {
+      const elements = await page.locator('a,button,input,select,textarea,[role="button"],[role="link"],[contenteditable="true"]').evaluateAll((nodes) =>
+        nodes.slice(0, 500).map((el) => {
+          const input = el;
+          const tag = String(el.tagName || "").toLowerCase();
+          const type = String(input.type || "").toLowerCase();
+          const sensitive = type === "password" || /(password|passwd|secret|token|otp|one[- ]?time|verification|2fa|mfa|cc-|card|cvv|cvc)/i.test(
+            [input.autocomplete, input.name, input.id, el.getAttribute("aria-label")].filter(Boolean).join(" ")
+          );
+          return {
+            tag,
+            type,
+            id: String(input.id || "").slice(0, 160),
+            name: String(input.name || "").slice(0, 160),
+            role: String(el.getAttribute("role") || "").slice(0, 80),
+            text: String(el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 240),
+            placeholder: sensitive ? "" : String(input.placeholder || "").slice(0, 200),
+            ariaLabel: String(el.getAttribute("aria-label") || "").slice(0, 200),
+            testId: String(el.getAttribute("data-testid") || el.getAttribute("data-test") || "").slice(0, 160),
+            disabled: Boolean(input.disabled || el.getAttribute("aria-disabled") === "true"),
+            sensitive,
+          };
+        })
+      );
+      return { ...(await pageMetadata(page, resolvedTargetId)), elements };
+    }
     if (action === "click") {
       const selector = String(body.selector || "");
       if (!selector) throw Object.assign(new Error("selector_required"), { statusCode: 400 });
