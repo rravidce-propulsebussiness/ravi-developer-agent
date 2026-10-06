@@ -11,7 +11,8 @@
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
     "agents": "latest",
-    "zod": "latest"
+    "zod": "latest",
+    "@cloudflare/workers-oauth-provider": "^1.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
