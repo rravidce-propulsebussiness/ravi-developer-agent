@@ -811,7 +811,7 @@ async function captureTenantScreenshot(env: Env, tenant: TenantContext, targetId
 }
 
 function createServer(tenant: TenantContext, env: Env) {
-  const server = new McpServer({ name: "ravi-developer-agent", version: "1.0.0" });
+  const server = new McpServer({ name: "ravi-developer-agent", version: "1.0.2" });
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
@@ -913,7 +913,7 @@ function createServer(tenant: TenantContext, env: Env) {
     async () => result({
       ok: true,
       service: "Ravi Developer Agent",
-      version: "1.0.0",
+      version: "1.0.2",
       transport: "MCP Streamable HTTP",
       authentication: "oauth-2.1",
       providers: {
@@ -2280,17 +2280,19 @@ function createServer(tenant: TenantContext, env: Env) {
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <style>
 :root{color-scheme:light}
-html,body{width:100%;height:100%;margin:0;background:#eef1f4;color:#111827;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
-#frame{width:100%;height:100dvh;display:flex;flex-direction:column;background:#fff}
-#chrome{height:46px;flex:0 0 46px;display:flex;align-items:center;gap:10px;padding:0 max(14px,env(safe-area-inset-right)) 0 max(14px,env(safe-area-inset-left));background:#f5f6f7;border-bottom:1px solid #d9dde3;box-sizing:border-box}
-#dots{display:flex;gap:7px;flex:0 0 auto}
-#dots span{width:10px;height:10px;border-radius:50%;background:#c7ccd3}
-#address{min-width:0;flex:1;height:29px;display:flex;align-items:center;padding:0 12px;border:1px solid #d9dde3;border-radius:9px;background:#fff;color:#4b5563;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#mode{flex:0 0 auto;font-size:11px;color:#6b7280}
+html,body{width:100%;height:100%;margin:0;background:#fff;color:#111827;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+#frame{width:100%;height:100%;display:flex;flex-direction:column;background:#fff}
+#chrome{height:40px;flex:0 0 40px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#f7f7f8;border-bottom:1px solid #e5e7eb;box-sizing:border-box}
+#dots{display:flex;gap:5px;flex:0 0 auto}
+#dots span{width:8px;height:8px;border-radius:50%;background:#c7ccd3}
+#address{min-width:0;flex:1;height:25px;display:flex;align-items:center;padding:0 9px;border:1px solid #dfe3e8;border-radius:7px;background:#fff;color:#4b5563;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#live{flex:0 0 auto;font-size:10px;color:#6b7280}
 #viewport{position:relative;min-height:0;flex:1;display:grid;place-items:center;background:#fff}
 #shot{display:none;width:100%;height:100%;object-fit:contain;background:#fff}
-#status{position:absolute;left:14px;bottom:max(14px,env(safe-area-inset-bottom));z-index:3;padding:7px 10px;border-radius:999px;background:rgba(17,24,39,.80);color:#fff;font-size:12px;backdrop-filter:blur(8px)}
-#error{display:none;padding:24px;max-width:560px;text-align:center;line-height:1.45;color:#4b5563}
+#loading{display:grid;place-items:center;gap:10px;width:100%;height:100%;color:#4b5563;font-size:13px;text-align:center;padding:24px;box-sizing:border-box;background:#fff}
+#spinner{width:24px;height:24px;border-radius:50%;border:3px solid #e5e7eb;border-top-color:#6b7280;animation:spin .8s linear infinite}
+#status{position:absolute;left:10px;bottom:10px;z-index:3;padding:6px 9px;border-radius:999px;background:rgba(17,24,39,.78);color:#fff;font-size:11px;backdrop-filter:blur(8px)}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
@@ -2298,25 +2300,26 @@ html,body{width:100%;height:100%;margin:0;background:#eef1f4;color:#111827;font-
   <div id="chrome">
     <div id="dots"><span></span><span></span><span></span></div>
     <div id="address">Live browser</div>
-    <div id="mode">Fullscreen browser preview</div>
+    <div id="live">LIVE</div>
   </div>
   <div id="viewport">
-    <img id="shot" alt="Ravi Developer Agent live browser">
-    <div id="error"></div>
-    <div id="status">Opening browser…</div>
+    <div id="loading"><div id="spinner"></div><div id="loadingText">Connecting to browser…</div></div>
+    <img id="shot" alt="Live browser preview">
+    <div id="status">Connecting…</div>
   </div>
 </div>
 <script>
 const shot=document.getElementById("shot");
+const loading=document.getElementById("loading");
+const loadingText=document.getElementById("loadingText");
 const status=document.getElementById("status");
-const errorBox=document.getElementById("error");
 const address=document.getElementById("address");
-const mode=document.getElementById("mode");
 let stopped=false;
 let timer=null;
-let fullscreenRequested=false;
+let pipRequested=false;
+let failures=0;
 
-function resultContent(result){
+function contentOf(result){
   if(!result)return[];
   if(Array.isArray(result.content))return result.content;
   if(Array.isArray(result.call_tool_result?.content))return result.call_tool_result.content;
@@ -2324,76 +2327,86 @@ function resultContent(result){
   return[];
 }
 
-function renderResult(result){
-  const content=resultContent(result);
-  const image=content.find(item=>item?.type==="image"&&item?.data);
+function outputOf(result){
+  return result?.structuredContent||result?.toolOutput||result?.call_tool_result?.structuredContent||result?.mcp_tool_result?.structuredContent||null;
+}
+
+function render(result){
+  const image=contentOf(result).find(item=>item?.type==="image"&&item?.data);
   if(!image)return false;
   shot.src="data:"+(image.mimeType||"image/png")+";base64,"+image.data;
   shot.style.display="block";
-  errorBox.style.display="none";
+  loading.style.display="none";
   status.textContent="Live · read only";
+  const output=outputOf(result);
+  if(typeof output?.url==="string"&&output.url)address.textContent=output.url;
+  failures=0;
   return true;
 }
 
 function renderInitial(api){
-  const meta=api?.toolResponseMetadata;
-  const initial=meta?.call_tool_result||meta?.mcp_tool_result||meta;
-  renderResult(initial);
-  const url=api?.toolOutput?.url||api?.toolResponseMetadata?.structuredContent?.url;
-  if(typeof url==="string"&&url)address.textContent=url;
+  if(!api)return;
+  const meta=api.toolResponseMetadata;
+  render(meta?.call_tool_result);
+  if(shot.style.display!=="block")render(meta?.mcp_tool_result);
+  const output=api.toolOutput;
+  if(typeof output?.url==="string"&&output.url)address.textContent=output.url;
 }
 
-async function ensureFullscreen(api){
+async function ensurePip(api){
   if(!api)return;
-  const current=api.displayMode;
-  mode.textContent=current==="fullscreen"?"Fullscreen browser preview":"Opening fullscreen…";
-  if(current==="fullscreen")return;
-  if(!api.requestDisplayMode||fullscreenRequested)return;
-  fullscreenRequested=true;
+  if(api.displayMode==="pip")return;
+  if(!api.requestDisplayMode||pipRequested)return;
+  pipRequested=true;
   try{
-    await api.requestDisplayMode({mode:"fullscreen"});
+    await api.requestDisplayMode({mode:"pip"});
   }catch(e){
-    fullscreenRequested=false;
+    pipRequested=false;
   }
 }
 
-async function tick(){
+async function refresh(){
   if(stopped)return;
   const api=window.openai;
   if(api){
     renderInitial(api);
-    await ensureFullscreen(api);
+    await ensurePip(api);
   }
 
   if(document.hidden){
-    timer=setTimeout(tick,900);
+    timer=setTimeout(refresh,900);
     return;
   }
 
   if(!api?.callTool){
-    status.textContent="Waiting for live browser…";
-    timer=setTimeout(tick,400);
+    status.textContent="Waiting for browser…";
+    loadingText.textContent="Preparing live browser preview…";
+    timer=setTimeout(refresh,350);
     return;
   }
 
   try{
     const result=await api.callTool("browser_screenshot",{});
-    if(!renderResult(result))throw new Error("Screenshot tool returned no image.");
-    const url=result?.structuredContent?.url||result?.toolOutput?.url;
-    if(typeof url==="string"&&url)address.textContent=url;
+    if(!render(result))throw new Error("No screenshot image in tool result");
   }catch(e){
-    status.textContent=shot.style.display==="block"?"Reconnecting…":"Opening browser…";
+    failures++;
+    status.textContent=shot.style.display==="block"?"Reconnecting…":"Connecting…";
+    loadingText.textContent=failures>3?"Browser is reconnecting…":"Connecting to browser…";
   }
-  timer=setTimeout(tick,900);
+
+  timer=setTimeout(refresh, failures>3?1200:700);
 }
 
 window.addEventListener("openai:set_globals",()=>{
-  fullscreenRequested=false;
+  pipRequested=false;
   const api=window.openai;
-  if(api)ensureFullscreen(api);
+  if(api){
+    renderInitial(api);
+    ensurePip(api);
+  }
 });
 window.addEventListener("beforeunload",()=>{stopped=true;if(timer)clearTimeout(timer)});
-tick();
+refresh();
 </script>
 </body>
 </html>`;
@@ -2408,31 +2421,36 @@ tick();
           prefersBorder: false,
           domain: "https://ravi-developer-agent.rvrmvth.workers.dev",
         },
-        "openai/ui": { availableDisplayModes: ["fullscreen"] },
-        "openai/widgetDescription": "Fullscreen read-only live browser preview. Opens directly in an immersive browser surface and continuously refreshes authenticated screenshots.",
+        "openai/ui": { availableDisplayModes: ["pip"] },
+        "openai/widgetDescription": "Floating PiP live browser preview for ongoing browser sessions. Shows an immediate screenshot when available and continuously refreshes authenticated screenshots.",
       },
     }],
   });
 
-  // Keep v2 registered for already-open ChatGPT conversations that cached the
-  // previous tool descriptor. Both v2 and v3 now advertise fullscreen-only.
+  // Keep every historical URI alive because ChatGPT can cache a tool's resource
+  // URI for the lifetime of an existing conversation/plugin session.
+  registerAppResource(server, "browser-view-v1", "ui://ravi-developer-agent/browser-stream-v1.html", {}, async () =>
+    browserStreamResource("ui://ravi-developer-agent/browser-stream-v1.html")
+  );
   registerAppResource(server, "browser-view-v2", "ui://ravi-developer-agent/browser-stream-v2.html", {}, async () =>
     browserStreamResource("ui://ravi-developer-agent/browser-stream-v2.html")
   );
-
   registerAppResource(server, "browser-view-v3", "ui://ravi-developer-agent/browser-stream-v3.html", {}, async () =>
     browserStreamResource("ui://ravi-developer-agent/browser-stream-v3.html")
+  );
+  registerAppResource(server, "browser-view-v4", "ui://ravi-developer-agent/browser-stream-v4.html", {}, async () =>
+    browserStreamResource("ui://ravi-developer-agent/browser-stream-v4.html")
   );
 
   registerTool("browser_live_view", {
     title: "Browser Live View",
-    description: "Open the current guarded browser directly in a fullscreen TinyFish-style live preview. The view shows an immediate screenshot and continuously refreshes from the authenticated browser session.",
+    description: "Open the current guarded browser in a floating TinyFish-style PiP live preview. The preview stays inside ChatGPT, avoids a separate fullscreen app surface, and refreshes authenticated screenshots continuously.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
     _meta: {
-      ui: { resourceUri: "ui://ravi-developer-agent/browser-stream-v3.html" },
-      "openai/outputTemplate": "ui://ravi-developer-agent/browser-stream-v3.html",
+      ui: { resourceUri: "ui://ravi-developer-agent/browser-stream-v4.html" },
+      "openai/outputTemplate": "ui://ravi-developer-agent/browser-stream-v4.html",
     },
   }, async () => {
     const shot = await captureTenantScreenshot(env, tenant);
@@ -2441,8 +2459,8 @@ tick();
         ...shot.structuredContent,
         browserReady: true,
         refreshMode: "authenticated-screenshot-stream",
-        preferredDisplayMode: "fullscreen",
-        viewer: "browser_live_view_v3",
+        preferredDisplayMode: "pip",
+        viewer: "browser_live_view_v4",
       },
       content: shot.content,
     };
@@ -2450,13 +2468,13 @@ tick();
 
   registerTool("browser_live_preview", {
     title: "Browser Live Preview",
-    description: "Open the current guarded browser directly in a fullscreen read-only live preview in ChatGPT.",
+    description: "Open the current guarded browser in a floating PiP live preview in ChatGPT.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
     _meta: {
-      ui: { resourceUri: "ui://ravi-developer-agent/browser-stream-v3.html" },
-      "openai/outputTemplate": "ui://ravi-developer-agent/browser-stream-v3.html",
+      ui: { resourceUri: "ui://ravi-developer-agent/browser-stream-v4.html" },
+      "openai/outputTemplate": "ui://ravi-developer-agent/browser-stream-v4.html",
     },
   }, async () => {
     const shot = await captureTenantScreenshot(env, tenant);
@@ -2465,8 +2483,8 @@ tick();
         ...shot.structuredContent,
         browserReady: true,
         refreshMode: "authenticated-screenshot-stream",
-        preferredDisplayMode: "fullscreen",
-        viewer: "browser_live_preview_v3",
+        preferredDisplayMode: "pip",
+        viewer: "browser_live_preview_v4",
       },
       content: shot.content,
     };
