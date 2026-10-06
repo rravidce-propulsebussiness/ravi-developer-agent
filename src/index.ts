@@ -16,6 +16,7 @@ type AuthProps = {
 };
 
 type AuthServerService = AuthorizationServerBinding<AuthProps> & {
+  getGithubToken(userId: string, fallback?: string): Promise<string | null>;
   getProviderClient(provider: "cloudflare" | "supabase"): Promise<{ clientId: string; clientSecret: string } | null>;
 };
 
@@ -2054,12 +2055,13 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
       }
       const url = new URL(request.url);
       if (url.pathname !== "/mcp") return new Response("Not found", { status: 404 });
+      const githubToken = await env.AUTH_SERVER.getGithubToken(ctx.props.userId, ctx.props.githubToken);
       const tenant: TenantContext = {
         tenantId: ctx.props.tenantId,
         subject: ctx.props.subject,
         login: ctx.props.login,
         scopes: ctx.auth.scope,
-        githubToken: ctx.props.githubToken,
+        githubToken: githubToken ?? ctx.props.githubToken,
       };
       const limited = await enforceTenantRateLimit(env, tenant.tenantId);
       if (limited) return limited;
