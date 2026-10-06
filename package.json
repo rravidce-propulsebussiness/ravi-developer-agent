@@ -1,6 +1,6 @@
 {
   "name": "ravi-developer-agent",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,9 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "deploy:auth": "wrangler deploy -c wrangler.auth.jsonc",
-    "dev:auth": "wrangler dev -c wrangler.auth.jsonc"
+    "dev:auth": "wrangler dev -c wrangler.auth.jsonc",
+    "test": "vitest run",
+    "verify": "tsc --noEmit && vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
@@ -21,6 +23,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
     "typescript": "latest",
-    "wrangler": "latest"
+    "wrangler": "latest",
+    "vitest": "latest"
   }
 }
