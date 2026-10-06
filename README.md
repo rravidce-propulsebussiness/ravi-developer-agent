@@ -30,6 +30,7 @@ GitHub provider tokens are kept inside OAuth token properties and are not emitte
 - List accounts and Worker scripts.
 - List Worker secret **names** without revealing values.
 - Delete a named Worker secret after confirmation.
+- Secret values must be created or rotated directly in Cloudflare; this public plugin never asks users to provide secret values.
 - Trigger an existing Workers Build after confirmation.
 - List recent builds and inspect build outcome/status.
 
@@ -47,8 +48,8 @@ GitHub provider tokens are kept inside OAuth token properties and are not emitte
 - Session-level hostname allowlists enforced by Cloudflare.
 - Multiple tabs, activation, closure, page text and screenshots.
 - Approval-gated click/type/select/key interactions.
-- Password, OTP, token/secret and payment-card fields are blocked from agent typing.
-- Short-lived read-only Live View and interactive human takeover in the MCP Apps UI.
+- Password, API-key, MFA/OTP, token/secret and payment-card fields are blocked from agent typing.
+- Short-lived read-only Live View in the MCP Apps UI. Interactive credential entry is intentionally unsupported.
 
 ## Security model
 
@@ -62,6 +63,7 @@ GitHub provider tokens are kept inside OAuth token properties and are not emitte
 - MCP requests are rate limited per tenant.
 - Browser Live View URLs are returned only in MCP UI metadata, not model-visible structured content.
 - Browser sessions use explicit domain guardrails.
+- The public plugin does not collect passwords, API keys, MFA/OTP codes, payment-card data, or other authentication secrets.
 - Business OS / Propulse infrastructure is not used by Ravi Developer Agent.
 
 ## One-time publisher bootstrap
