@@ -132,3 +132,44 @@ The repository uses two isolated Cloudflare Workers:
 - `ravi-developer-agent-auth`
 
 Both build from `main` using dedicated Workers Builds configuration. No Business OS or Propulse Worker, KV, D1, R2, token, database, or browser session is reused.
+
+
+## Self-hosted browser backend
+
+The feature branch `feature/self-hosted-browser-runner` adds an optional Playwright/Chromium runner under `runner/`. When configured, Ravi Developer Agent uses your own PC or VPS as the primary browser backend and keeps Cloudflare Browser Run as a fallback.
+
+This avoids Cloudflare Free-plan browser-minute limits. The practical limit becomes the CPU, RAM, bandwidth, and uptime of the machine running Chromium.
+
+### Windows PC
+
+```powershell
+cd runner
+.\setup-windows.ps1 -PublicBaseUrl "https://browser.example.com"
+.\start-windows.ps1
+```
+
+The setup script creates a local `.env` with a cryptographically random runner token and installs Playwright Chromium. Keep that token private.
+
+### VPS / Docker
+
+```bash
+cd runner
+cp .env.example .env
+# Edit RUNNER_TOKEN and PUBLIC_BASE_URL.
+docker compose up -d --build
+```
+
+Expose the runner through an HTTPS reverse proxy or secure tunnel. The runner itself should not be published as an unauthenticated raw port.
+
+### Connect the Worker
+
+Set these on the `ravi-developer-agent` Worker:
+
+```text
+SELF_HOSTED_BROWSER_URL=https://browser.example.com
+SELF_HOSTED_BROWSER_TOKEN=<same token from runner/.env>
+```
+
+After redeploying, `browser_session_start` prefers the self-hosted runner. If it is unavailable and Cloudflare Browser Run is bound, the tool falls back automatically.
+
+The public browser tool names do not change, so existing ChatGPT workflows continue to use `browser_session_start`, `browser_tab_open`, `browser_screenshot`, `browser_page_text`, `browser_click`, `browser_type`, and `browser_live_view`.

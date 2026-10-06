@@ -1,0 +1,12 @@
+services:
+  browser-runner:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      RUNNER_HOST: 0.0.0.0
+      HEADLESS: "true"
+    ports:
+      - "127.0.0.1:8788:8788"
+    shm_size: "1gb"

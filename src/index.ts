@@ -34,25 +34,29 @@ type Env = {
   SUPABASE_OAUTH_CLIENT_ID?: string;
   SUPABASE_OAUTH_CLIENT_SECRET?: string;
   OPENAI_APPS_CHALLENGE?: string;
+  SELF_HOSTED_BROWSER_URL?: string;
+  SELF_HOSTED_BROWSER_TOKEN?: string;
 };
 
 export class TenantBrowserSession extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/session") {
-      const body = await request.json() as { sessionId?: string; allowedDomains?: string[] };
+      const body = await request.json() as { sessionId?: string; allowedDomains?: string[]; backend?: "cloudflare" | "selfhosted" };
       if (!body.sessionId || !body.allowedDomains?.length) return new Response("invalid_session", { status: 400 });
       await this.ctx.storage.put("sessionId", body.sessionId);
       await this.ctx.storage.put("allowedDomains", body.allowedDomains);
+      await this.ctx.storage.put("backend", body.backend ?? "cloudflare");
       return Response.json({ ok: true });
     }
     if (request.method === "GET" && url.pathname === "/session") {
       const sessionId = await this.ctx.storage.get<string>("sessionId");
       const allowedDomains = await this.ctx.storage.get<string[]>("allowedDomains");
-      return sessionId ? Response.json({ sessionId, allowedDomains: allowedDomains ?? [] }) : new Response("session_not_found", { status: 404 });
+      const backend = await this.ctx.storage.get<"cloudflare" | "selfhosted">("backend");
+      return sessionId ? Response.json({ sessionId, allowedDomains: allowedDomains ?? [], backend: backend ?? "cloudflare" }) : new Response("session_not_found", { status: 404 });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
-      await this.ctx.storage.delete(["sessionId", "allowedDomains"]);
+      await this.ctx.storage.delete(["sessionId", "allowedDomains", "backend"]);
       return Response.json({ ok: true });
     }
     return new Response("not_found", { status: 404 });
@@ -547,30 +551,110 @@ async function providerOAuthCallback(request: Request, env: Env, provider: Provi
   }
 }
 
-type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
+type BrowserBackendKind = "cloudflare" | "selfhosted";
+type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[]; backend: BrowserBackendKind };
+
+function selfHostedBrowserConfigured(env: Env): boolean {
+  return Boolean(env.SELF_HOSTED_BROWSER_URL && env.SELF_HOSTED_BROWSER_TOKEN);
+}
+
+function selfHostedBrowserOrigin(env: Env): string | null {
+  if (!env.SELF_HOSTED_BROWSER_URL) return null;
+  try {
+    const url = new URL(env.SELF_HOSTED_BROWSER_URL);
+    return url.protocol === "https:" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+async function runnerFetch(env: Env, path: string, init: RequestInit = {}): Promise<Response> {
+  if (!selfHostedBrowserConfigured(env)) throw new Error("Self-hosted browser runner is not configured.");
+  const base = new URL(env.SELF_HOSTED_BROWSER_URL as string);
+  if (base.protocol !== "https:") throw new Error("Self-hosted browser runner must use HTTPS.");
+  const url = new URL(path, base.origin);
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${env.SELF_HOSTED_BROWSER_TOKEN}`);
+  if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  return fetch(url, { ...init, headers });
+}
+
+async function runnerJson<T>(env: Env, path: string, init: RequestInit = {}): Promise<T> {
+  const response = await runnerFetch(env, path, init);
+  if (!response.ok) {
+    let reason = "";
+    try {
+      const body = await response.json() as { error?: string };
+      reason = body.error ? `: ${body.error}` : "";
+    } catch {}
+    throw new Error(`Self-hosted browser runner request failed (${response.status})${reason}.`);
+  }
+  return response.json() as Promise<T>;
+}
 
 async function tenantBrowserPolicy(env: Env, tenant: TenantContext): Promise<TenantBrowserPolicy> {
   const id = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
   const response = await env.BROWSER_SESSIONS.get(id).fetch("https://browser-session/session");
   if (!response.ok) throw new Error("No active browser session for this tenant.");
-  const body = await response.json() as { sessionId?: string; allowedDomains?: string[] };
+  const body = await response.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
   if (!body.sessionId || !body.allowedDomains?.length) throw new Error("Tenant browser session is invalid.");
-  return { sessionId: body.sessionId, allowedDomains: body.allowedDomains };
+  return { sessionId: body.sessionId, allowedDomains: body.allowedDomains, backend: body.backend ?? "cloudflare" };
 }
 
 async function tenantSessionId(env: Env, tenant: TenantContext): Promise<string> {
   return (await tenantBrowserPolicy(env, tenant)).sessionId;
 }
 
+async function browserSessionAlive(env: Env, policy: TenantBrowserPolicy): Promise<boolean> {
+  try {
+    if (policy.backend === "selfhosted") {
+      const response = await runnerFetch(env, `/v1/sessions/${encodeURIComponent(policy.sessionId)}`);
+      return response.ok;
+    }
+    if (!env.BROWSER) return false;
+    return Boolean(await (env.BROWSER as any).getSession(policy.sessionId));
+  } catch {
+    return false;
+  }
+}
+
+async function closeBackendSession(env: Env, policy: TenantBrowserPolicy): Promise<void> {
+  if (policy.backend === "selfhosted") {
+    try {
+      await runnerFetch(env, `/v1/sessions/${encodeURIComponent(policy.sessionId)}`, { method: "DELETE" });
+    } catch {}
+    return;
+  }
+  if (!env.BROWSER) return;
+  try {
+    await (env.BROWSER as any).closeSession(policy.sessionId);
+  } catch {}
+}
+
+async function runnerAction<T>(env: Env, policy: TenantBrowserPolicy, action: string, payload: Record<string, unknown> = {}): Promise<T> {
+  return runnerJson<T>(env, `/v1/sessions/${encodeURIComponent(policy.sessionId)}/actions`, {
+    method: "POST",
+    body: JSON.stringify({ action, ...payload }),
+  });
+}
+
 async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
   const target = new URL(url);
   if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("Unsupported URL scheme.");
   if (target.username || target.password) throw new Error("Credentials in navigation URLs are not allowed.");
-  if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
   const policy = await tenantBrowserPolicy(env, tenant);
   if (!hostnameAllowed(target.hostname, policy.allowedDomains)) {
     throw new Error("Destination hostname is outside this tenant browser session policy.");
   }
+  if (policy.backend === "selfhosted") {
+    const response = await runnerJson<{ tab?: unknown }>(
+      env,
+      `/v1/sessions/${encodeURIComponent(policy.sessionId)}/tabs`,
+      { method: "POST", body: JSON.stringify({ url: target.toString() }) },
+    );
+    return safeTab(response.tab);
+  }
+  if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
   const browserRun = env.BROWSER as any;
   const tab = await browserRun.devtools.newTarget(
     policy.sessionId,
@@ -581,9 +665,10 @@ async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
 }
 
 async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: string) {
+  const policy = await tenantBrowserPolicy(env, tenant);
+  if (policy.backend !== "cloudflare") throw new Error("Cloud browser page connection requested for a self-hosted session.");
   if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-  const sessionId = await tenantSessionId(env, tenant);
-  const browser = await puppeteer.connect(env.BROWSER as any, sessionId);
+  const browser = await puppeteer.connect(env.BROWSER as any, policy.sessionId);
   const pages = await browser.pages();
   let page = pages.find((candidate: any) => targetId && String((candidate.target() as any)._targetId ?? "") === targetId);
   if (!page && !targetId) page = pages.find((candidate: any) => candidate.url() !== "about:blank") ?? pages[0];
@@ -711,6 +796,11 @@ function createServer(tenant: TenantContext, env: Env) {
           connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
         },
       },
+      browser: {
+        selfHostedConfigured: selfHostedBrowserConfigured(env),
+        selfHostedOrigin: selfHostedBrowserOrigin(env),
+        cloudflareFallbackAvailable: Boolean(env.BROWSER),
+      },
     }),
   );
 
@@ -771,15 +861,18 @@ function createServer(tenant: TenantContext, env: Env) {
       const browserOwner = env.BROWSER_SESSIONS.get(env.BROWSER_SESSIONS.idFromName(tenant.tenantId));
       try {
         const sessionResponse = await browserOwner.fetch("https://browser-session/session");
-        if (sessionResponse.ok && env.BROWSER) {
-          const session = await sessionResponse.json() as { sessionId?: string };
+        if (sessionResponse.ok) {
+          const session = await sessionResponse.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
           if (session.sessionId) {
-            const close = await env.BROWSER.fetch(
-              "https://browser-rendering/devtools/browser/" + encodeURIComponent(session.sessionId),
-              { method: "DELETE" },
-            );
-            browserClosed = close.ok || close.status === 404;
+            await closeBackendSession(env, {
+              sessionId: session.sessionId,
+              allowedDomains: session.allowedDomains ?? [],
+              backend: session.backend ?? "cloudflare",
+            });
+            browserClosed = true;
           }
+        } else {
+          browserClosed = true;
         }
       } catch {
         browserClosed = false;
@@ -1629,18 +1722,21 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_capabilities",
     {
       title: "Browser Capabilities",
-      description: "Describe the isolated cloud-browser capabilities available to this tenant. This tool does not navigate or modify websites.",
+      description: "Describe the isolated browser capabilities available to this tenant. This tool does not navigate or modify websites.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async () => result({
-      provider: "Cloudflare Browser Run",
+      provider: selfHostedBrowserConfigured(env) ? "Self-hosted Chromium (primary) + Cloudflare Browser Run (fallback)" : "Cloudflare Browser Run",
+      selfHostedConfigured: selfHostedBrowserConfigured(env),
+      selfHostedOrigin: selfHostedBrowserOrigin(env),
       capabilities: [
         "persistent tenant browser sessions",
-        "Cloudflare-enforced hostname guardrails",
+        "hostname guardrails on every browser request",
         "multiple tabs and safe page navigation",
         "tab activation and cleanup",
         "short-lived read-only Live View in ChatGPT",
+        "automatic Cloudflare fallback when the self-hosted runner is unavailable",
       ],
       isolation: "per-tenant browser context/session",
       navigationEnabled: true,
@@ -1651,7 +1747,7 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_session_start",
     {
       title: "Start Browser Session",
-      description: "Start or reuse an isolated cloud browser session restricted to approved hostnames. Reusing sessions and a short idle timeout reduce Browser Run quota waste.",
+      description: "Start or reuse an isolated browser session restricted to approved hostnames. A configured self-hosted Chromium runner is preferred; Cloudflare Browser Run is the fallback.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: {
@@ -1660,65 +1756,75 @@ function createServer(tenant: TenantContext, env: Env) {
     },
     async ({ allowedDomains }: { allowedDomains: string[] }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
-      if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-      const browserRun = env.BROWSER as any;
       const requestedDomains = [...new Set(allowedDomains.map((domain) => domain.trim().toLowerCase()))].sort();
       const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
       const owner = env.BROWSER_SESSIONS.get(ownerId);
+      const preferredBackend: BrowserBackendKind = selfHostedBrowserConfigured(env) ? "selfhosted" : "cloudflare";
 
-      // Reuse the tenant's still-live session when its guardrail policy is identical.
-      // This avoids unnecessary browser launches and prevents overlapping idle sessions
-      // from consuming the account's Browser Run allowance.
       const existingResponse = await owner.fetch("https://browser-session/session");
       if (existingResponse.ok) {
-        const existing = await existingResponse.json() as { sessionId?: string; allowedDomains?: string[] };
+        const existing = await existingResponse.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
         if (existing.sessionId) {
-          let sessionAlive = false;
-          try {
-            sessionAlive = Boolean(await browserRun.getSession(existing.sessionId));
-          } catch {
-            sessionAlive = false;
-          }
-          const existingDomains = [...new Set((existing.allowedDomains ?? []).map((domain) => domain.trim().toLowerCase()))].sort();
+          const policy: TenantBrowserPolicy = {
+            sessionId: existing.sessionId,
+            allowedDomains: existing.allowedDomains ?? [],
+            backend: existing.backend ?? "cloudflare",
+          };
+          const existingDomains = [...new Set(policy.allowedDomains.map((domain) => domain.trim().toLowerCase()))].sort();
           const samePolicy = JSON.stringify(existingDomains) === JSON.stringify(requestedDomains);
-          if (sessionAlive && samePolicy) {
-            return result({ browserReady: true, reused: true, idleTimeoutMs: 60_000 });
+          const alive = await browserSessionAlive(env, policy);
+          if (alive && samePolicy && policy.backend === preferredBackend) {
+            return result({ browserReady: true, reused: true, backend: policy.backend });
           }
-          if (sessionAlive) {
-            try {
-              await browserRun.closeSession(existing.sessionId);
-            } catch {
-              // The provider may close a session between inspection and cleanup.
-            }
-          }
+          if (alive) await closeBackendSession(env, policy);
           await owner.fetch("https://browser-session/session", { method: "DELETE" });
         }
       }
 
-      const session = await browserRun.acquire({
-        keepAlive: 60_000,
-        targets: true,
-        liveViewUrlExpiresInMs: 300_000,
-        guardrails: { allowedDomains: requestedDomains },
-      }) as { sessionId?: string; id?: string };
-      const sessionId = session.sessionId ?? session.id;
+      let backend: BrowserBackendKind = preferredBackend;
+      let sessionId = "";
+      let fallbackFromSelfHosted = false;
+
+      if (preferredBackend === "selfhosted") {
+        try {
+          const session = await runnerJson<{ sessionId?: string }>(env, "/v1/sessions", {
+            method: "POST",
+            body: JSON.stringify({ allowedDomains: requestedDomains }),
+          });
+          sessionId = session.sessionId ?? "";
+        } catch (error) {
+          if (!env.BROWSER) throw error;
+          backend = "cloudflare";
+          fallbackFromSelfHosted = true;
+        }
+      }
+
+      if (backend === "cloudflare") {
+        if (!env.BROWSER) throw new Error("No browser backend is available. Configure the self-hosted runner or Cloudflare Browser Run.");
+        const browserRun = env.BROWSER as any;
+        const session = await browserRun.acquire({
+          keepAlive: 60_000,
+          targets: true,
+          liveViewUrlExpiresInMs: 300_000,
+          guardrails: { allowedDomains: requestedDomains },
+        }) as { sessionId?: string; id?: string };
+        sessionId = session.sessionId ?? session.id ?? "";
+      }
+
       if (!sessionId) throw new Error("Browser provider did not return a session identifier.");
       const stored = await owner.fetch("https://browser-session/session", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, allowedDomains: requestedDomains }),
+        body: JSON.stringify({ sessionId, allowedDomains: requestedDomains, backend }),
       });
       if (!stored.ok) {
-        try {
-          await browserRun.closeSession(sessionId);
-        } catch {
-          // Best-effort cleanup if ownership persistence fails.
-        }
+        await closeBackendSession(env, { sessionId, allowedDomains: requestedDomains, backend });
         throw new Error("Browser session ownership could not be stored.");
       }
-      return result({ browserReady: true, reused: false, idleTimeoutMs: 60_000 });
+      return result({ browserReady: true, reused: false, backend, fallbackFromSelfHosted });
     },
   );
+
   registerTool("browser_tabs", {
     title: "List Browser Tabs",
     description: "List the current pages in the tenant browser session without exposing debugger or Live View credentials.",
@@ -1726,14 +1832,18 @@ function createServer(tenant: TenantContext, env: Env) {
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
   }, async () => {
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const response = await runnerJson<{ tabs?: unknown[] }>(env, `/v1/sessions/${encodeURIComponent(policy.sessionId)}/tabs`);
+      return result({ tabs: (response.tabs ?? []).map(safeTab), backend: policy.backend });
+    }
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const sessionId = await tenantSessionId(env, tenant);
-    const browserRun = env.BROWSER as any;
-    const rawTabs = await browserRun.devtools.listTargets(sessionId, {
+    const rawTabs = await (env.BROWSER as any).devtools.listTargets(policy.sessionId, {
       liveViewUrlExpiresInMs: 300_000,
     }) as unknown[];
-    return result({ tabs: rawTabs.map(safeTab) });
+    return result({ tabs: rawTabs.map(safeTab), backend: policy.backend });
   });
+
   registerTool("browser_tab_open", {
     title: "Open Browser Tab",
     description: "Open a permitted HTTP/HTTPS URL in a new tab of the tenant's guarded browser session.",
@@ -1743,7 +1853,8 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async ({ url }: { url: string }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     const tab = await openTenantTab(env, tenant, url);
-    return result({ tab });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    return result({ tab, backend: policy.backend });
   });
 
   registerTool("browser_tab_activate", {
@@ -1754,11 +1865,14 @@ function createServer(tenant: TenantContext, env: Env) {
     inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/) },
   }, async ({ targetId }: { targetId: string }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "activate", { targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const sessionId = await tenantSessionId(env, tenant);
-    const browserRun = env.BROWSER as any;
-    await browserRun.devtools.activateTarget(sessionId, targetId);
-    return result({ targetId, active: true });
+    await (env.BROWSER as any).devtools.activateTarget(policy.sessionId, targetId);
+    return result({ targetId, active: true, backend: policy.backend });
   });
 
   registerTool("browser_tab_close", {
@@ -1769,38 +1883,42 @@ function createServer(tenant: TenantContext, env: Env) {
     inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/) },
   }, async ({ targetId }: { targetId: string }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "closeTab", { targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const sessionId = await tenantSessionId(env, tenant);
-    const browserRun = env.BROWSER as any;
-    await browserRun.devtools.closeTarget(sessionId, targetId);
-    return result({ targetId, closed: true });
+    await (env.BROWSER as any).devtools.closeTarget(policy.sessionId, targetId);
+    return result({ targetId, closed: true, backend: policy.backend });
   });
 
   registerTool("browser_session_close", {
     title: "Close Browser Session",
-    description: "Close the tenant's current cloud browser session and clear its ownership record, including stale session state.",
+    description: "Close the tenant's current browser session and clear its ownership record, including stale session state.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: true },
     inputSchema: {},
   }, async () => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
-    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const browserRun = env.BROWSER as any;
     const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
     const owner = env.BROWSER_SESSIONS.get(ownerId);
     const response = await owner.fetch("https://browser-session/session");
+    let backend: BrowserBackendKind | null = null;
     if (response.ok) {
-      const stored = await response.json() as { sessionId?: string };
+      const stored = await response.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
       if (stored.sessionId) {
-        try {
-          await browserRun.closeSession(stored.sessionId);
-        } catch {
-          // Treat an already-expired provider session as closed.
-        }
+        const policy: TenantBrowserPolicy = {
+          sessionId: stored.sessionId,
+          allowedDomains: stored.allowedDomains ?? [],
+          backend: stored.backend ?? "cloudflare",
+        };
+        backend = policy.backend;
+        await closeBackendSession(env, policy);
       }
     }
     await owner.fetch("https://browser-session/session", { method: "DELETE" });
-    return result({ closed: true });
+    return result({ closed: true, backend });
   });
 
   registerTool("browser_screenshot", {
@@ -1810,6 +1928,14 @@ function createServer(tenant: TenantContext, env: Env) {
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional() },
   }, async ({ targetId }: { targetId?: string }) => {
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const shot = await runnerAction<{ targetId: string; url: string; pngBase64: string }>(env, policy, "screenshot", { targetId });
+      return {
+        structuredContent: { targetId: shot.targetId, url: shot.url, backend: policy.backend },
+        content: [{ type: "image" as const, data: shot.pngBase64, mimeType: "image/png" }],
+      };
+    }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
       const screenshot = await page.screenshot({ type: "png" });
@@ -1817,7 +1943,7 @@ function createServer(tenant: TenantContext, env: Env) {
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return {
-        structuredContent: { targetId: resolvedTargetId, url: page.url() },
+        structuredContent: { targetId: resolvedTargetId, url: page.url(), backend: policy.backend },
         content: [{ type: "image" as const, data: btoa(binary), mimeType: "image/png" }],
       };
     } finally {
@@ -1832,6 +1958,11 @@ function createServer(tenant: TenantContext, env: Env) {
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional() },
   }, async ({ targetId }: { targetId?: string }) => {
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "pageText", { targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
       const visibleText = String(await page.evaluate(() => (globalThis as any).document?.body?.innerText ?? ""));
@@ -1840,6 +1971,7 @@ function createServer(tenant: TenantContext, env: Env) {
         url: page.url(),
         title: await page.title(),
         text: visibleText.slice(0, 50000),
+        backend: policy.backend,
       });
     } finally {
       browser.disconnect();
@@ -1859,6 +1991,11 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async ({ selector, targetId, confirm }: { selector: string; targetId?: string; confirm: boolean }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!confirm) return result({ requiresConfirmation: true, action: "browser_click", selector, targetId: targetId ?? null });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "click", { selector, targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
       await page.click(selector);
@@ -1868,6 +2005,7 @@ function createServer(tenant: TenantContext, env: Env) {
         clicked: true,
         url: page.url(),
         title: await page.title(),
+        backend: policy.backend,
       });
     } finally {
       browser.disconnect();
@@ -1889,6 +2027,11 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async ({ selector, text, clearFirst, targetId, confirm }: { selector: string; text: string; clearFirst: boolean; targetId?: string; confirm: boolean }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!confirm) return result({ requiresConfirmation: true, action: "browser_type", selector, targetId: targetId ?? null, characters: text.length });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "type", { selector, text, clearFirst, targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
       const field = await page.$eval(selector, (el: any) => ({
@@ -1916,6 +2059,7 @@ function createServer(tenant: TenantContext, env: Env) {
         typed: true,
         characters: text.length,
         url: page.url(),
+        backend: policy.backend,
       });
     } finally {
       browser.disconnect();
@@ -1936,14 +2080,15 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async ({ selector, values, targetId, confirm }: { selector: string; values: string[]; targetId?: string; confirm: boolean }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!confirm) return result({ requiresConfirmation: true, action: "browser_select", selector, values, targetId: targetId ?? null });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "select", { selector, values, targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
       const selected = await page.select(selector, ...values);
-      return result({
-        targetId: resolvedTargetId,
-        selected,
-        url: page.url(),
-      });
+      return result({ targetId: resolvedTargetId, selected, url: page.url(), backend: policy.backend });
     } finally {
       browser.disconnect();
     }
@@ -1962,6 +2107,11 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async ({ key, targetId, confirm }: { key: "Enter" | "Escape" | "Tab" | "Backspace" | "Delete" | "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"; targetId?: string; confirm: boolean }) => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!confirm) return result({ requiresConfirmation: true, action: "browser_press", key, targetId: targetId ?? null });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "press", { key, targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
       await page.keyboard.press(key);
@@ -1971,6 +2121,7 @@ function createServer(tenant: TenantContext, env: Env) {
         pressed: key,
         url: page.url(),
         title: await page.title(),
+        backend: policy.backend,
       });
     } finally {
       browser.disconnect();
@@ -1988,6 +2139,11 @@ function createServer(tenant: TenantContext, env: Env) {
       targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
     },
   }, async ({ selector, timeoutMs, targetId }: { selector?: string; timeoutMs: number; targetId?: string }) => {
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "wait", { selector, timeoutMs, targetId });
+      return result({ ...output, backend: policy.backend });
+    }
     const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
     try {
       if (selector) await page.waitForSelector(selector, { timeout: timeoutMs });
@@ -1997,20 +2153,33 @@ function createServer(tenant: TenantContext, env: Env) {
         ready: true,
         url: page.url(),
         title: await page.title(),
+        backend: policy.backend,
       });
     } finally {
       browser.disconnect();
     }
   });
 
-  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v1.html", {}, async () => ({
-    contents: [{
-      uri: "ui://ravi-developer-agent/browser-v1.html",
-      mimeType: RESOURCE_MIME_TYPE,
-      text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params) });apply(window.openai?.toolResponseMetadata);</script></body></html>`,
-      _meta: { ui: { prefersBorder: false, domain: "https://ravi-developer-agent.rvrmvth.workers.dev", csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
-    }],
-  }));
+  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v1.html", {}, async () => {
+    const frameDomains = ["https://live.browser.run"];
+    const selfHostedOrigin = selfHostedBrowserOrigin(env);
+    if (selfHostedOrigin) frameDomains.push(selfHostedOrigin);
+    return {
+      contents: [{
+        uri: "ui://ravi-developer-agent/browser-v1.html",
+        mimeType: RESOURCE_MIME_TYPE,
+        text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser" allow="clipboard-read; clipboard-write"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params)});apply(window.openai?.toolResponseMetadata);</script></body></html>`,
+        _meta: {
+          ui: {
+            prefersBorder: false,
+            domain: "https://ravi-developer-agent.rvrmvth.workers.dev",
+            csp: { frameDomains },
+          },
+          "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] },
+        },
+      }],
+    };
+  });
 
   registerTool("browser_live_view", {
     title: "Browser Live View",
@@ -2021,25 +2190,38 @@ function createServer(tenant: TenantContext, env: Env) {
     _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v1.html" } },
   }, async () => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const liveView = await runnerJson<{ url: string; expiresAt?: number }>(
+        env,
+        `/v1/sessions/${encodeURIComponent(policy.sessionId)}/live-view`,
+        { method: "POST" },
+      );
+      return {
+        structuredContent: { browserReady: true, backend: policy.backend },
+        content: [{ type: "text" as const, text: "Secure self-hosted browser live view is ready." }],
+        _meta: { liveView: { url: liveView.url, expiresAt: liveView.expiresAt } },
+      };
+    }
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const sessionId = await tenantSessionId(env, tenant);
     const browserRun = env.BROWSER as any;
-    const targets = await browserRun.devtools.listTargets(sessionId, {
+    const targets = await browserRun.devtools.listTargets(policy.sessionId, {
       liveViewUrlExpiresInMs: 300_000,
     }) as Array<{ id?: string; type?: string; url?: string }>;
     const page = targets.find((target) => target.type === "page" && target.url !== "about:blank")
       ?? targets.find((target) => target.type === "page");
-    const liveView = await browserRun.getLiveView(sessionId, {
+    const liveView = await browserRun.getLiveView(policy.sessionId, {
       targetId: page?.id,
       mode: "tab",
       expiresInMs: 300_000,
     });
     return {
-      structuredContent: { browserReady: true },
-      content: [{ type: "text" as const, text: "Secure browser live view is ready." }],
+      structuredContent: { browserReady: true, backend: policy.backend },
+      content: [{ type: "text" as const, text: "Secure Cloudflare browser live view is ready." }],
       _meta: { liveView },
     };
   });
+
   return server;
 }
 
