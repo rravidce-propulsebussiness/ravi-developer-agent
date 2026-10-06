@@ -171,6 +171,21 @@ function createServer(tenant: TenantContext) {
     if (!response.ok) throw new Error("Browser tab open failed.");
     return result({ tenant: tenant.tenantId, tab: await response.json() });
   });
+  server.registerTool("browser_page_preview", {
+    title: "Browser Page Preview",
+    description: "Capture a PNG preview of a public web page for display in ChatGPT.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: { url: z.string().url() },
+  }, async ({ url }) => {
+    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const response = await env.BROWSER.fetch("https://browser-rendering/screenshot", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) });
+    if (!response.ok) throw new Error("Browser preview failed.");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return { content: [{ type: "image", data: btoa(binary), mimeType: "image/png" }] };
+  });
   return server;
 }
 
