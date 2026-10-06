@@ -70,7 +70,7 @@ Get-Content $envPath | ForEach-Object {
   if ($parts.Count -eq 2) { [Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1], "Process") }
 }
 
-$runner = Start-Process -FilePath "npm" -ArgumentList @("start") -WorkingDirectory $PSScriptRoot -PassThru
+$runner = Start-Process -FilePath "npm.cmd" -ArgumentList @("start") -WorkingDirectory $PSScriptRoot -PassThru
 
 @{
   publicUrl = $publicUrl
