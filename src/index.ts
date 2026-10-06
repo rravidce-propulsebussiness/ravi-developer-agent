@@ -229,8 +229,14 @@ function connectionKeyBytes(env: Env): Uint8Array {
   return bytes;
 }
 
+function ownedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
 async function connectionCryptoKey(env: Env): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", connectionKeyBytes(env), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+  return crypto.subtle.importKey("raw", ownedArrayBuffer(connectionKeyBytes(env)), { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
@@ -263,9 +269,9 @@ async function encryptConnection(env: Env, tenantId: string, provider: ProviderN
 async function decryptConnection(env: Env, tenantId: string, provider: ProviderName, value: EncryptedConnection): Promise<ProviderConnection> {
   const aad = new TextEncoder().encode(tenantId + ":" + provider);
   const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: base64ToBytes(value.iv), additionalData: aad },
+    { name: "AES-GCM", iv: ownedArrayBuffer(base64ToBytes(value.iv)), additionalData: aad },
     await connectionCryptoKey(env),
-    base64ToBytes(value.ciphertext),
+    ownedArrayBuffer(base64ToBytes(value.ciphertext)),
   );
   return JSON.parse(new TextDecoder().decode(plaintext)) as ProviderConnection;
 }
