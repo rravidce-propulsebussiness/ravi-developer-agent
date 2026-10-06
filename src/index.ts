@@ -1651,7 +1651,7 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_session_start",
     {
       title: "Start Browser Session",
-      description: "Start an isolated persistent cloud browser session restricted to approved hostnames.",
+      description: "Start or reuse an isolated cloud browser session restricted to approved hostnames. Reusing sessions and a short idle timeout reduce Browser Run quota waste.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: {
@@ -1662,23 +1662,61 @@ function createServer(tenant: TenantContext, env: Env) {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
       if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
       const browserRun = env.BROWSER as any;
+      const requestedDomains = [...new Set(allowedDomains.map((domain) => domain.trim().toLowerCase()))].sort();
+      const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
+      const owner = env.BROWSER_SESSIONS.get(ownerId);
+
+      // Reuse the tenant's still-live session when its guardrail policy is identical.
+      // This avoids unnecessary browser launches and prevents overlapping idle sessions
+      // from consuming the account's Browser Run allowance.
+      const existingResponse = await owner.fetch("https://browser-session/session");
+      if (existingResponse.ok) {
+        const existing = await existingResponse.json() as { sessionId?: string; allowedDomains?: string[] };
+        if (existing.sessionId) {
+          let sessionAlive = false;
+          try {
+            sessionAlive = Boolean(await browserRun.getSession(existing.sessionId));
+          } catch {
+            sessionAlive = false;
+          }
+          const existingDomains = [...new Set((existing.allowedDomains ?? []).map((domain) => domain.trim().toLowerCase()))].sort();
+          const samePolicy = JSON.stringify(existingDomains) === JSON.stringify(requestedDomains);
+          if (sessionAlive && samePolicy) {
+            return result({ browserReady: true, reused: true, idleTimeoutMs: 60_000 });
+          }
+          if (sessionAlive) {
+            try {
+              await browserRun.closeSession(existing.sessionId);
+            } catch {
+              // The provider may close a session between inspection and cleanup.
+            }
+          }
+          await owner.fetch("https://browser-session/session", { method: "DELETE" });
+        }
+      }
+
       const session = await browserRun.acquire({
-        keepAlive: 1_200_000,
+        keepAlive: 60_000,
         targets: true,
         liveViewUrlExpiresInMs: 300_000,
-        guardrails: { allowedDomains },
+        guardrails: { allowedDomains: requestedDomains },
       }) as { sessionId?: string; id?: string };
       const sessionId = session.sessionId ?? session.id;
       if (!sessionId) throw new Error("Browser provider did not return a session identifier.");
-      const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
-      const owner = env.BROWSER_SESSIONS.get(ownerId);
       const stored = await owner.fetch("https://browser-session/session", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, allowedDomains }),
+        body: JSON.stringify({ sessionId, allowedDomains: requestedDomains }),
       });
-      if (!stored.ok) throw new Error("Browser session ownership could not be stored.");
-      return result({ browserReady: true });
+      if (!stored.ok) {
+        try {
+          await browserRun.closeSession(sessionId);
+        } catch {
+          // Best-effort cleanup if ownership persistence fails.
+        }
+        throw new Error("Browser session ownership could not be stored.");
+      }
+      return result({ browserReady: true, reused: false, idleTimeoutMs: 60_000 });
     },
   );
   registerTool("browser_tabs", {
@@ -1740,18 +1778,28 @@ function createServer(tenant: TenantContext, env: Env) {
 
   registerTool("browser_session_close", {
     title: "Close Browser Session",
-    description: "Close the tenant's current cloud browser session and clear its ownership record.",
+    description: "Close the tenant's current cloud browser session and clear its ownership record, including stale session state.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: true },
     inputSchema: {},
   }, async () => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const sessionId = await tenantSessionId(env, tenant);
     const browserRun = env.BROWSER as any;
-    await browserRun.closeSession(sessionId);
     const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
-    await env.BROWSER_SESSIONS.get(ownerId).fetch("https://browser-session/session", { method: "DELETE" });
+    const owner = env.BROWSER_SESSIONS.get(ownerId);
+    const response = await owner.fetch("https://browser-session/session");
+    if (response.ok) {
+      const stored = await response.json() as { sessionId?: string };
+      if (stored.sessionId) {
+        try {
+          await browserRun.closeSession(stored.sessionId);
+        } catch {
+          // Treat an already-expired provider session as closed.
+        }
+      }
+    }
+    await owner.fetch("https://browser-session/session", { method: "DELETE" });
     return result({ closed: true });
   });
 
