@@ -78,7 +78,7 @@
             {
               "description": "Open a guarded browser session",
               "prompt": "Start a browser session restricted to example.com and open https://example.com.",
-              "tools_triggered": "browser_session_start, browser_open",
+              "tools_triggered": "browser_session_start, browser_tab_open",
               "expected_behavior": "Create a tenant-isolated browser session with an explicit hostname allowlist and open only the allowed destination."
             },
             {
