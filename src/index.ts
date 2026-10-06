@@ -2298,13 +2298,27 @@ function createServer(tenant: TenantContext, env: Env) {
 
     const policy = await tenantBrowserPolicy(env, tenant);
     if (policy.backend === "selfhosted") {
+      if (text.startsWith("@ravi-vault-secret:")) {
+        const secretName = text.slice("@ravi-vault-secret:".length).trim();
+        const output = await runnerAction<Record<string, unknown>>(env, policy, "fillSecret", { selector, secretName, targetId });
+        return result({ ...output, backend: policy.backend, compatibilityMode: "vault-secret" });
+      }
       if (text.startsWith("@ravi-generated-secret:")) {
         const alias = text.slice("@ravi-generated-secret:".length).trim();
         const output = await runnerAction<Record<string, unknown>>(env, policy, "fillGeneratedSecret", { selector, alias, targetId });
         return result({ ...output, backend: policy.backend, compatibilityMode: "generated-secret" });
       }
       if (text === "@ravi-generated-test-file:company-proof") {
-        const output = await runnerAction<Record<string, unknown>>(env, policy, "uploadGeneratedTestFile", { selector, targetId });
+        const testPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zr5sAAAAASUVORK5CYII=";
+        const output = await runnerAction<Record<string, unknown>>(env, policy, "uploadFiles", {
+          selector,
+          targetId,
+          files: [{
+            name: "propulse-test-company-proof.png",
+            mimeType: "image/png",
+            dataBase64: testPngBase64,
+          }],
+        });
         return result({ ...output, backend: policy.backend, compatibilityMode: "generated-test-file" });
       }
       const output = await runnerAction<Record<string, unknown>>(env, policy, "type", { selector, text, clearFirst, targetId });
