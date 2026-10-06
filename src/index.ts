@@ -247,6 +247,28 @@ async function githubJson<T>(tenant: TenantContext, path: string, init: RequestI
   return response.json() as Promise<T>;
 }
 
+function isSensitiveRepositoryPath(path: string): boolean {
+  const normalized = path.toLowerCase().replace(/\\/g, "/");
+  const base = normalized.split("/").pop() ?? "";
+  if (base === ".env.example" || base === ".env.sample" || base.endsWith(".example")) return false;
+  if (base === ".env" || base.startsWith(".env.") || base === ".npmrc" || base === ".pypirc") return true;
+  if (/^(id_rsa|id_ed25519|credentials|secrets?)(\.|$)/.test(base)) return true;
+  if (normalized.includes("/.ssh/") || normalized.includes("/.aws/") || normalized.includes("/.gnupg/")) return true;
+  return false;
+}
+
+function containsLikelyCredential(value: string): boolean {
+  const checks = [
+    /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+    /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
+    /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
+    /\bAKIA[0-9A-Z]{16}\b/,
+    /\bsk-[A-Za-z0-9_-]{20,}\b/,
+    /\b(?:api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|password)\s*[:=]\s*["'][^"'\n]{8,}["']/i,
+  ];
+  return checks.some((pattern) => pattern.test(value));
+}
+
 function encodeRepoPath(path: string): string {
   const parts = path.split("/").filter(Boolean);
   if (!parts.length || parts.some((part) => part === "." || part === "..")) throw new Error("Invalid repository path.");
@@ -370,7 +392,7 @@ async function beginProviderOAuth(env: Env, tenant: TenantContext, provider: Pro
     url.searchParams.set("state", state);
     url.searchParams.set("code_challenge", challenge);
     url.searchParams.set("code_challenge_method", "S256");
-    url.searchParams.set("scope", "offline_access account-settings.read workers-scripts.read workers-scripts.write workers-kv-storage.read workers-kv-storage.write d1.read d1.write workers-r2.read workers-r2.write workers-ci.read workers-ci.write browser-rendering.read browser-rendering.write");
+    url.searchParams.set("scope", "offline_access account-settings.read workers-scripts.read workers-scripts.write workers-ci.read workers-ci.write");
     return url.toString();
   }
 
@@ -779,6 +801,7 @@ function createServer(tenant: TenantContext, env: Env) {
       },
     },
     async ({ owner, repo, path, ref }: { owner: string; repo: string; path: string; ref?: string }) => {
+      if (isSensitiveRepositoryPath(path)) throw new Error("Reading credential/config secret files is not supported.");
       const query = ref ? "?ref=" + encodeURIComponent(ref) : "";
       const file = await githubJson<{
         type?: string;
@@ -794,12 +817,14 @@ function createServer(tenant: TenantContext, env: Env) {
         throw new Error("GitHub path is not a readable UTF-8 file.");
       }
       if ((file.size ?? 0) > 750000) throw new Error("File is too large for an inline tool result.");
+      const decoded = decodeUtf8Base64(file.content);
+      if (containsLikelyCredential(decoded)) throw new Error("The requested file appears to contain authentication secrets and cannot be returned through this plugin.");
       return result({
         repository: owner + "/" + repo,
         path: file.path ?? path,
         sha: file.sha ?? null,
         size: file.size ?? null,
-        content: decodeUtf8Base64(file.content),
+        content: decoded,
         htmlUrl: file.html_url ?? null,
       });
     },
@@ -861,6 +886,9 @@ function createServer(tenant: TenantContext, env: Env) {
     },
     async ({ owner, repo, path, branch, message, content, confirm }: { owner: string; repo: string; path: string; branch: string; message: string; content: string; confirm: boolean }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (isSensitiveRepositoryPath(path)) throw new Error("Writing credential/config secret files is not supported.");
+      if (path.toLowerCase().replace(/\\/g, "/").startsWith(".github/workflows/")) throw new Error("Editing GitHub Actions workflow files is not enabled for this plugin.");
+      if (containsLikelyCredential(content)) throw new Error("The proposed file content appears to contain authentication secrets. Store secrets directly with the provider and reference them by environment variable instead.");
       if (!confirm) return result({ requiresConfirmation: true, action: "put_file", repository: owner + "/" + repo, path, branch, bytes: new TextEncoder().encode(content).length });
 
       const apiPath = "/repos/" + encodeURIComponent(owner) + "/" + encodeURIComponent(repo) + "/contents/" + encodeRepoPath(path);
@@ -1430,6 +1458,7 @@ function createServer(tenant: TenantContext, env: Env) {
     },
     async ({ projectRef, name, query, confirm }: { projectRef: string; name: string; query: string; confirm: boolean }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (containsLikelyCredential(query)) throw new Error("Migration SQL appears to contain authentication secrets. Store secrets with the provider instead of embedding them in SQL.");
       if (!confirm) return result({
         requiresConfirmation: true,
         action: "supabase_apply_migration",
