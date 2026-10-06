@@ -2030,7 +2030,8 @@ function anonymousDiscoveryTenant(): TenantContext {
 
 async function publicMcpDiscovery(request: Request, env: Env): Promise<Response> {
   const method = await mcpMethod(request);
-  if (!method || !PUBLIC_MCP_METHODS.has(method)) {
+  const transportProbe = request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS";
+  if (!transportProbe && (!method || !PUBLIC_MCP_METHODS.has(method))) {
     return new Response("Authentication required", {
       status: 401,
       headers: {
@@ -2210,7 +2211,8 @@ export default {
 
     if (url.pathname === "/mcp") {
       const method = await mcpMethod(request);
-      if (method && PUBLIC_MCP_METHODS.has(method)) {
+      const transportProbe = request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS";
+      if (transportProbe || (method && PUBLIC_MCP_METHODS.has(method))) {
         return publicMcpDiscovery(request, env);
       }
       return oauthMcp.fetch(request, env, ctx);
