@@ -100,6 +100,80 @@ async function githubConfigured(env: AuthEnv): Promise<boolean> {
   return Boolean(await githubClient(env));
 }
 
+type GithubUserTokenRecord = {
+  accessToken: string;
+  expiresAt?: number;
+  refreshToken?: string;
+  refreshExpiresAt?: number;
+  updatedAt: number;
+};
+
+function githubUserTokenKey(userId: string): string {
+  return "github:user-token:" + userId;
+}
+
+async function saveGithubUserToken(env: AuthEnv, userId: string, token: {
+  access_token: string;
+  expires_in?: number;
+  refresh_token?: string;
+  refresh_token_expires_in?: number;
+}): Promise<GithubUserTokenRecord> {
+  const now = Date.now();
+  const record: GithubUserTokenRecord = {
+    accessToken: token.access_token,
+    expiresAt: token.expires_in ? now + token.expires_in * 1000 : undefined,
+    refreshToken: token.refresh_token,
+    refreshExpiresAt: token.refresh_token_expires_in ? now + token.refresh_token_expires_in * 1000 : undefined,
+    updatedAt: now,
+  };
+  await env.OAUTH_KV.put(githubUserTokenKey(userId), JSON.stringify(record));
+  return record;
+}
+
+async function activeGithubUserToken(env: AuthEnv, userId: string, fallback?: string): Promise<string | null> {
+  const raw = await env.OAUTH_KV.get(githubUserTokenKey(userId));
+  if (!raw) return fallback ?? null;
+  let record: GithubUserTokenRecord;
+  try {
+    record = JSON.parse(raw) as GithubUserTokenRecord;
+  } catch {
+    return fallback ?? null;
+  }
+  if (!record.accessToken) return fallback ?? null;
+  if (!record.expiresAt || record.expiresAt > Date.now() + 5 * 60 * 1000) return record.accessToken;
+  if (!record.refreshToken || (record.refreshExpiresAt && record.refreshExpiresAt <= Date.now() + 60_000)) {
+    return fallback ?? record.accessToken;
+  }
+
+  const client = await githubClient(env);
+  if (!client) return fallback ?? record.accessToken;
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: client.clientId,
+      client_secret: client.clientSecret,
+      grant_type: "refresh_token",
+      refresh_token: record.refreshToken,
+    }),
+  });
+  if (!response.ok) return fallback ?? record.accessToken;
+  const refreshed = await response.json() as {
+    access_token?: string;
+    expires_in?: number;
+    refresh_token?: string;
+    refresh_token_expires_in?: number;
+  };
+  if (!refreshed.access_token) return fallback ?? record.accessToken;
+  const saved = await saveGithubUserToken(env, userId, {
+    access_token: refreshed.access_token,
+    expires_in: refreshed.expires_in,
+    refresh_token: refreshed.refresh_token ?? record.refreshToken,
+    refresh_token_expires_in: refreshed.refresh_token_expires_in,
+  });
+  return saved.accessToken;
+}
+
 async function githubManifestPage(env: AuthEnv): Promise<Response> {
   if (await githubConfigured(env)) {
     return new Response(`<!doctype html><meta charset="utf-8"><title>GitHub App ready</title><style>body{font-family:system-ui;background:#0f1115;color:#f5f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:620px;padding:28px;border:1px solid #2a3040;border-radius:18px;background:#171a21}</style><div class="card"><h1>GitHub App already configured</h1><p>Ravi Developer Agent can now use GitHub as its sign-in and repository provider.</p></div>`, {
@@ -404,7 +478,7 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
     }),
   });
   if (!tokenResponse.ok) return new Response("GitHub token exchange failed.", { status: 502 });
-  const token = await tokenResponse.json() as { access_token?: string; error?: string };
+  const token = await tokenResponse.json() as { access_token?: string; expires_in?: number; refresh_token?: string; refresh_token_expires_in?: number; error?: string };
   if (!token.access_token) return new Response("GitHub sign-in failed.", { status: 401 });
 
   const userResponse = await fetch("https://api.github.com/user", {
@@ -412,7 +486,7 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
       "accept": "application/vnd.github+json",
       "authorization": `Bearer ${token.access_token}`,
       "user-agent": "ravi-developer-agent",
-      "x-github-api-version": "2022-11-28",
+      "x-github-api-version": "2026-03-10",
     },
   });
   if (!userResponse.ok) return new Response("GitHub identity lookup failed.", { status: 502 });
@@ -420,6 +494,12 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
   if (!user.id) return new Response("GitHub identity is invalid.", { status: 502 });
 
   const userId = `github-${user.id}`;
+  await saveGithubUserToken(env, userId, {
+    access_token: token.access_token,
+    expires_in: token.expires_in,
+    refresh_token: token.refresh_token,
+    refresh_token_expires_in: token.refresh_token_expires_in,
+  });
   const props: AuthProps = {
     userId,
     tenantId: `gh-${user.id}`,
@@ -462,6 +542,10 @@ export class AuthServer extends WorkerEntrypoint<AuthEnv> {
 
   validateToken(resource: string, token: string) {
     return authorizationServer.validateToken(resource, token, this.env);
+  }
+
+  async getGithubToken(userId: string, fallback?: string) {
+    return activeGithubUserToken(this.env, userId, fallback);
   }
 
   async getProviderClient(provider: "cloudflare" | "supabase") {
