@@ -50,6 +50,15 @@ function tenantFromRequest(request: Request): TenantContext | null {
   return { subject, tenantId };
 }
 
+async function tenantSessionId(env: Env, tenant: TenantContext): Promise<string> {
+  const id = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
+  const response = await env.BROWSER_SESSIONS.get(id).fetch("https://browser-session/session");
+  if (!response.ok) throw new Error("No active browser session for this tenant.");
+  const body = await response.json() as { sessionId?: string };
+  if (!body.sessionId) throw new Error("Tenant browser session is invalid.");
+  return body.sessionId;
+}
+
 function createServer(tenant: TenantContext) {
   const server = new McpServer({ name: "ravi-developer-agent", version: "0.2.0" });
 
@@ -182,9 +191,10 @@ function createServer(tenant: TenantContext) {
     description: "List the current pages and live-view metadata in an existing tenant browser session.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
-    inputSchema: { sessionId: z.string().uuid() },
-  }, async ({ sessionId }) => {
+    inputSchema: {},
+  }, async () => {
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const sessionId = await tenantSessionId(env, tenant);
     const response = await env.BROWSER.fetch(`https://browser-rendering/devtools/browser/${encodeURIComponent(sessionId)}/json/list?liveViewUrlExpiresInMs=300000`);
     if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
     return result({ tenant: tenant.tenantId, tabs: await response.json() });
