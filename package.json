@@ -15,7 +15,8 @@
     "agents": "latest",
     "zod": "latest",
     "@cloudflare/workers-oauth-provider": "^1.0.0",
-    "@modelcontextprotocol/ext-apps": "latest"
+    "@modelcontextprotocol/ext-apps": "latest",
+    "@cloudflare/puppeteer": "^1.1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
