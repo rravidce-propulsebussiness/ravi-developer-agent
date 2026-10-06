@@ -163,8 +163,18 @@ function createServer(tenant: TenantContext) {
       if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
       const response = await env.BROWSER.fetch("https://browser-rendering/devtools/browser?keep_alive=1200000&targets=true&liveViewUrlExpiresInMs=300000", { method: "POST" });
       if (!response.ok) throw new Error(`Browser session start failed (${response.status}).`);
-      const session = await response.json();
-      return result({ tenant: tenant.tenantId, session });
+      const session = await response.json() as { sessionId?: string; id?: string };
+      const sessionId = session.sessionId ?? session.id;
+      if (!sessionId) throw new Error("Browser provider did not return a session identifier.");
+      const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
+      const owner = env.BROWSER_SESSIONS.get(ownerId);
+      const stored = await owner.fetch("https://browser-session/session", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+      if (!stored.ok) throw new Error("Browser session ownership could not be stored.");
+      return result({ tenant: tenant.tenantId, browserReady: true });
     },
   );
   server.registerTool("browser_tabs", {
