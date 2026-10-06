@@ -811,7 +811,7 @@ async function captureTenantScreenshot(env: Env, tenant: TenantContext, targetId
 }
 
 function createServer(tenant: TenantContext, env: Env) {
-  const server = new McpServer({ name: "ravi-developer-agent", version: "1.0.2" });
+  const server = new McpServer({ name: "ravi-developer-agent", version: "1.0.3" });
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
@@ -850,6 +850,9 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_press",
     "browser_wait",
     "browser_live_view",
+    "browser_live_preview",
+    "browser_preview_inline",
+    "browser_live_panel",
   ]);
   const registerTool = (name: string, config: any, handler: any) => {
     const normalizedConfig = {
@@ -913,7 +916,7 @@ function createServer(tenant: TenantContext, env: Env) {
     async () => result({
       ok: true,
       service: "Ravi Developer Agent",
-      version: "1.0.2",
+      version: "1.0.3",
       transport: "MCP Streamable HTTP",
       authentication: "oauth-2.1",
       providers: {
@@ -2444,23 +2447,18 @@ refresh();
 
   registerTool("browser_live_view", {
     title: "Browser Live View",
-    description: "Open the current guarded browser in a floating TinyFish-style PiP live preview. The preview stays inside ChatGPT, avoids a separate fullscreen app surface, and refreshes authenticated screenshots continuously.",
+    description: "Return the current guarded browser frame directly inline in the chat. This tool intentionally does not launch an App UI, side panel, fullscreen surface, or separate Ravi Developer Agent window.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
-    _meta: {
-      ui: { resourceUri: "ui://ravi-developer-agent/browser-stream-v4.html" },
-      "openai/outputTemplate": "ui://ravi-developer-agent/browser-stream-v4.html",
-    },
   }, async () => {
     const shot = await captureTenantScreenshot(env, tenant);
     return {
       structuredContent: {
         ...shot.structuredContent,
         browserReady: true,
-        refreshMode: "authenticated-screenshot-stream",
-        preferredDisplayMode: "pip",
-        viewer: "browser_live_view_v4",
+        presentation: "inline-chat-image",
+        viewer: "browser_live_view_inline_v1",
       },
       content: shot.content,
     };
@@ -2468,7 +2466,50 @@ refresh();
 
   registerTool("browser_live_preview", {
     title: "Browser Live Preview",
-    description: "Open the current guarded browser in a floating PiP live preview in ChatGPT.",
+    description: "Return the current guarded browser frame directly inline in ChatGPT without opening a right-side App panel.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: {},
+  }, async () => {
+    const shot = await captureTenantScreenshot(env, tenant);
+    return {
+      structuredContent: {
+        ...shot.structuredContent,
+        browserReady: true,
+        presentation: "inline-chat-image",
+        viewer: "browser_live_preview_inline_v1",
+      },
+      content: shot.content,
+    };
+  });
+
+  // New uncached tool name for chats that previously cached the App-UI descriptor
+  // of browser_live_view/browser_live_preview. Use this by default for a TinyFish-like
+  // in-chat browser frame.
+  registerTool("browser_preview_inline", {
+    title: "Browser Preview Inline",
+    description: "Show the current guarded browser screenshot directly inside the conversation. Never opens a right-side app, PiP, or fullscreen plugin surface.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: {},
+  }, async () => {
+    const shot = await captureTenantScreenshot(env, tenant);
+    return {
+      structuredContent: {
+        ...shot.structuredContent,
+        browserReady: true,
+        presentation: "inline-chat-image",
+        viewer: "browser_preview_inline_v1",
+      },
+      content: shot.content,
+    };
+  });
+
+  // Keep an explicit optional panel tool for users who actually want the MCP Apps
+  // floating UI. This is no longer the default browser-preview behavior.
+  registerTool("browser_live_panel", {
+    title: "Browser Live Panel",
+    description: "Open the optional floating App-UI browser panel. Use only when the user explicitly asks for the separate live panel.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
@@ -2484,7 +2525,7 @@ refresh();
         browserReady: true,
         refreshMode: "authenticated-screenshot-stream",
         preferredDisplayMode: "pip",
-        viewer: "browser_live_preview_v4",
+        viewer: "browser_live_panel_v1",
       },
       content: shot.content,
     };
