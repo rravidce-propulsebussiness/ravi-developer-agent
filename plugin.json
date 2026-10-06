@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "ravi-developer-agent",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Develop, deploy, and verify software using tenant-isolated GitHub, Cloudflare, Supabase, and guarded browser tools.",
   "author": {
     "name": "Ravi Ramavath",
@@ -29,7 +29,7 @@
           "Inspect and update GitHub repositories",
           "Inspect and trigger Cloudflare deployments",
           "Inspect Supabase schema and apply migrations",
-          "Verify public web apps in an isolated browser"
+          "Verify and operate authorized web apps in an isolated browser"
         ],
         "websiteURL": "https://ravi-developer-agent.rvrmvth.workers.dev",
         "supportURL": "https://ravi-developer-agent.rvrmvth.workers.dev/support",
@@ -97,7 +97,7 @@
         }
       },
       "publication": {
-        "release_notes": "Browser preview now renders directly inline in chat by default, avoiding the separate right-side App panel. Added a dedicated uncached inline preview tool and kept the floating panel as an explicit optional tool."
+        "release_notes": "Added persistent authenticated browser profiles on the self-hosted runner, runner-side secret aliases that can fill approved fields without exposing secret values to ChatGPT, and guarded browser file uploads. Existing normal typing continues to reject raw passwords, tokens, OTP/MFA codes, payment data, and other secret values."
       }
     }
   }
