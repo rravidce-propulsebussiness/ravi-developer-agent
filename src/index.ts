@@ -1078,7 +1078,7 @@ function createServer(tenant: TenantContext, env: Env) {
         return result({
           provider: "cloudflare",
           configured: false,
-          message: "Cloudflare OAuth client credentials and provider encryption must be configured by the app owner first.",
+          message: "Cloudflare The provider OAuth client must be configured by the app owner first.",
         });
       }
       return result({
@@ -1408,7 +1408,7 @@ function createServer(tenant: TenantContext, env: Env) {
         return result({
           provider: "supabase",
           configured: false,
-          message: "Supabase OAuth client credentials and provider encryption must be configured by the app owner first.",
+          message: "Supabase The provider OAuth client must be configured by the app owner first.",
         });
       }
       return result({
