@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "ravi-developer-agent",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Develop, deploy, and verify software using tenant-isolated GitHub, Cloudflare, Supabase, and guarded browser tools.",
   "author": {
     "name": "Ravi Ramavath",
@@ -97,7 +97,7 @@
         }
       },
       "publication": {
-        "release_notes": "Improved Browser Live Preview: floating PiP presentation for live sessions, legacy v1-v3 resource compatibility for existing chats, and more reliable screenshot reconnect behavior."
+        "release_notes": "Browser preview now renders directly inline in chat by default, avoiding the separate right-side App panel. Added a dedicated uncached inline preview tool and kept the floating panel as an explicit optional tool."
       }
     }
   }
