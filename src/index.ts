@@ -91,6 +91,14 @@ type OAuthConnectStateRecord = {
   createdAt: number;
 };
 
+type SecureActionRecord = {
+  tenantId: string;
+  action: "cloudflare_worker_secret";
+  accountId: string;
+  scriptName: string;
+  createdAt: number;
+};
+
 export class OAuthConnectState extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -105,6 +113,30 @@ export class OAuthConnectState extends DurableObject<Env> {
       if (!body) return new Response("state_not_found", { status: 404 });
       await this.ctx.storage.delete("state");
       if (Date.now() - body.createdAt > 10 * 60 * 1000) return new Response("state_expired", { status: 410 });
+      return Response.json(body);
+    }
+    if (request.method === "PUT" && url.pathname === "/action") {
+      const body = await request.json() as SecureActionRecord;
+      if (!body.tenantId || body.action !== "cloudflare_worker_secret" || !body.accountId || !body.scriptName || !body.createdAt) {
+        return new Response("invalid_action", { status: 400 });
+      }
+      await this.ctx.storage.put("action", body);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "GET" && url.pathname === "/action") {
+      const body = await this.ctx.storage.get<SecureActionRecord>("action");
+      if (!body) return new Response("action_not_found", { status: 404 });
+      if (Date.now() - body.createdAt > 10 * 60 * 1000) {
+        await this.ctx.storage.delete("action");
+        return new Response("action_expired", { status: 410 });
+      }
+      return Response.json(body);
+    }
+    if (request.method === "POST" && url.pathname === "/consume-action") {
+      const body = await this.ctx.storage.get<SecureActionRecord>("action");
+      if (!body) return new Response("action_not_found", { status: 404 });
+      await this.ctx.storage.delete("action");
+      if (Date.now() - body.createdAt > 10 * 60 * 1000) return new Response("action_expired", { status: 410 });
       return Response.json(body);
     }
     return new Response("not_found", { status: 404 });
@@ -505,6 +537,99 @@ async function providerOAuthCallback(request: Request, env: Env, provider: Provi
     const message = error instanceof Error ? error.message : "Provider connection failed.";
     return providerConnectedPage(provider, false, message);
   }
+}
+
+const SECURE_ACTION_ORIGIN = "https://ravi-developer-agent.rvrmvth.workers.dev";
+
+async function beginWorkerSecretSetup(env: Env, tenant: TenantContext, accountId: string, scriptName: string): Promise<string> {
+  const state = randomBase64Url(32);
+  const id = env.OAUTH_CONNECT_STATE.idFromName(state);
+  const response = await env.OAUTH_CONNECT_STATE.get(id).fetch("https://secure-action/action", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      tenantId: tenant.tenantId,
+      action: "cloudflare_worker_secret",
+      accountId,
+      scriptName,
+      createdAt: Date.now(),
+    } satisfies SecureActionRecord),
+  });
+  if (!response.ok) throw new Error("Secure Worker secret setup could not be created.");
+  return SECURE_ACTION_ORIGIN + "/secure/cloudflare/worker-secret?state=" + encodeURIComponent(state);
+}
+
+async function readSecureAction(env: Env, state: string, consume = false): Promise<SecureActionRecord> {
+  if (!/^[A-Za-z0-9_-]{20,200}$/.test(state)) throw new Error("Invalid secure action state.");
+  const id = env.OAUTH_CONNECT_STATE.idFromName(state);
+  const response = await env.OAUTH_CONNECT_STATE.get(id).fetch(
+    "https://secure-action/" + (consume ? "consume-action" : "action"),
+    { method: consume ? "POST" : "GET" },
+  );
+  if (!response.ok) throw new Error("Secure action link is invalid or expired.");
+  return response.json() as Promise<SecureActionRecord>;
+}
+
+function secretSetupPage(state: string, record: SecureActionRecord, message = ""): Response {
+  const safeState = state.replace(/[^A-Za-z0-9_-]/g, "");
+  const safeScript = record.scriptName.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+  const safeMessage = message.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
+  const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set Worker secret</title><style>body{font-family:system-ui;background:#0f1115;color:#f5f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{width:min(640px,calc(100% - 40px));padding:28px;border:1px solid #2a3040;border-radius:18px;background:#171a21}label{display:block;margin:14px 0 6px}input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #3a4255;border-radius:9px;background:#0f1115;color:#fff}button{margin-top:20px;padding:11px 18px;border:0;border-radius:10px;font-weight:700}.ok{color:#89e59a}.muted{color:#aeb7c8}</style>
+<div class="card"><h1>Set Worker secret</h1><p>Worker: <strong>${safeScript}</strong></p><p class="muted">The value is submitted directly to Ravi Developer Agent and Cloudflare. It is never returned to ChatGPT.</p>${safeMessage ? `<p class="ok">${safeMessage}</p>` : ""}
+<form method="post"><input type="hidden" name="state" value="${safeState}"><label>Secret name</label><input name="name" pattern="[A-Za-z_][A-Za-z0-9_]*" required autocomplete="off"><label>Secret value</label><input name="value" type="password" required autocomplete="new-password"><button type="submit">Save secret</button></form></div>`;
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
+async function secureWorkerSecretRoute(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  if (request.method === "GET") {
+    const state = url.searchParams.get("state") ?? "";
+    try {
+      const record = await readSecureAction(env, state, false);
+      return secretSetupPage(state, record);
+    } catch {
+      return new Response("This secure setup link is invalid or expired.", { status: 410 });
+    }
+  }
+
+  if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+  const form = await request.formData();
+  const state = String(form.get("state") ?? "");
+  const name = String(form.get("name") ?? "").trim();
+  const value = String(form.get("value") ?? "");
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || !value) return new Response("Invalid secret input.", { status: 400 });
+
+  let record: SecureActionRecord;
+  try {
+    record = await readSecureAction(env, state, true);
+  } catch {
+    return new Response("This secure setup link is invalid or expired.", { status: 410 });
+  }
+
+  const connection = await activeProviderConnection(env, record.tenantId, "cloudflare");
+  const response = await fetch(
+    "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(record.accountId) +
+      "/workers/scripts/" + encodeURIComponent(record.scriptName) + "/secrets",
+    {
+      method: "PUT",
+      headers: {
+        authorization: "Bearer " + connection.accessToken,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ name, type: "secret_text", text: value }),
+    },
+  );
+  if (!response.ok) return new Response("Cloudflare rejected the Worker secret update.", { status: 502 });
+  return secretSetupPage(state, record, "Secret saved successfully. You can close this tab.");
 }
 
 type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
@@ -1006,6 +1131,35 @@ function createServer(tenant: TenantContext, env: Env) {
           createdAt: worker.created_on ?? null,
           modifiedAt: worker.modified_on ?? null,
         })),
+      });
+    },
+  );
+
+  registerTool(
+    "cloudflare_worker_secret_setup",
+    {
+      title: "Securely Set Worker Secret",
+      description: "Create a short-lived human-only page for entering a Cloudflare Worker secret value without exposing it to ChatGPT.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
+        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ accountId, scriptName, confirm }: { accountId: string; scriptName: string; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "secure_worker_secret_setup", accountId, scriptName });
+      if (!await providerConnectionExists(env, tenant.tenantId, "cloudflare")) {
+        throw new Error("Cloudflare is not connected for this tenant.");
+      }
+      return result({
+        provider: "cloudflare",
+        accountId,
+        scriptName,
+        setupUrl: await beginWorkerSecretSetup(env, tenant, accountId, scriptName),
+        expiresInSeconds: 600,
       });
     },
   );
@@ -1811,6 +1965,10 @@ export default {
 
     if (url.pathname === "/oauth/cloudflare/callback") {
       return providerOAuthCallback(request, env, "cloudflare");
+    }
+
+    if (url.pathname === "/secure/cloudflare/worker-secret") {
+      return secureWorkerSecretRoute(request, env);
     }
 
     if (url.pathname === "/oauth/supabase/callback") {
