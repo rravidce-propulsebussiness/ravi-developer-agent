@@ -30,6 +30,7 @@ type Env = {
   CLOUDFLARE_OAUTH_CLIENT_SECRET?: string;
   SUPABASE_OAUTH_CLIENT_ID?: string;
   SUPABASE_OAUTH_CLIENT_SECRET?: string;
+  OPENAI_APPS_CHALLENGE?: string;
 };
 
 export class TenantBrowserSession extends DurableObject<Env> {
@@ -696,15 +697,24 @@ function createServer(tenant: TenantContext, env: Env) {
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
   const registerTool = (name: string, config: any, handler: any) => {
+    const normalizedConfig = {
+      ...config,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: true,
+        ...(config?.annotations ?? {}),
+      },
+    };
     const wrapped = async (...args: any[]) => {
       const output = await handler(...args);
       const requiresConfirmation = Boolean((output as any)?.structuredContent?.requiresConfirmation);
-      if (config?.annotations?.readOnlyHint === false && !requiresConfirmation) {
+      if (normalizedConfig.annotations.readOnlyHint === false && !requiresConfirmation) {
         await auditTenantAction(env, tenant, name);
       }
       return output;
     };
-    return (registerAppTool as any)(server, name, config, wrapped);
+    return (registerAppTool as any)(server, name, normalizedConfig, wrapped);
   };
 
   registerTool(
@@ -2069,9 +2079,51 @@ const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
   },
 });
 
+function publicPage(title: string, body: string): Response {
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:system-ui;line-height:1.55;background:#0f1115;color:#f5f7fb;max-width:860px;margin:48px auto;padding:0 22px}main{background:#171a21;border:1px solid #2a3040;border-radius:18px;padding:30px}a{color:#9ec7ff}h1,h2{line-height:1.2}.muted{color:#aeb7c8}</style></head><body><main><h1>${title}</h1>${body}<p class="muted">Ravi Developer Agent</p></main></body></html>`;
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=300",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
+const PRIVACY_HTML = `
+<p>Ravi Developer Agent helps users work with software projects through user-authorized GitHub, Cloudflare, Supabase, and cloud-browser connections.</p>
+<h2>Data we process</h2><p>We process the account identity, repository or project information, tool inputs, and provider authorization tokens required to perform requested actions. Provider tokens remain server-side and are not intentionally returned in MCP tool output. Browser sessions are isolated per tenant.</p>
+<h2>Storage and retention</h2><p>Provider connection data is kept in tenant-specific Cloudflare storage. Action audit records contain action names and timestamps, not secret values or tool payloads, and are retained for up to 30 days. Short-lived OAuth and secure-entry state expires automatically.</p>
+<h2>Sharing</h2><p>Data is sent only to services the user connects or websites the user asks the browser to access, as needed to perform requested actions. We do not sell user data.</p>
+<h2>Controls</h2><p>Users can disconnect supported providers, close browser sessions, and revoke provider authorization at the provider. Sensitive values such as Worker secret contents are entered through dedicated secure pages rather than normal ChatGPT tool inputs.</p>
+<h2>Contact</h2><p>For privacy questions or deletion requests, use the project support page.</p>`;
+
+const TERMS_HTML = `
+<p>By using Ravi Developer Agent, you authorize it to perform only the actions you request through accounts you are permitted to use.</p>
+<h2>Account responsibility</h2><p>You are responsible for maintaining appropriate permissions on connected GitHub, Cloudflare, Supabase, and website accounts and for reviewing consequential actions before confirmation.</p>
+<h2>Safe use</h2><p>Do not use the service to access systems without authorization, expose credentials, evade provider safeguards, or perform unlawful activity. Secret and authentication fields should be handled only through the dedicated secure or interactive flows.</p>
+<h2>Availability</h2><p>The service is provided on a best-effort basis and depends on third-party APIs and browser services. Provider limits, outages, or policy changes can affect availability.</p>
+<h2>Changes</h2><p>These terms may be updated as the service and supported providers change. Continued use after an update constitutes acceptance of the revised terms.</p>`;
+
+const SUPPORT_HTML = `
+<p>For setup help, bug reports, or security concerns, use the Ravi Developer Agent GitHub repository.</p>
+<p><a href="https://github.com/rravidce-propulsebussiness/ravi-developer-agent/issues">Open GitHub Issues</a></p>
+<p>When reporting a problem, never include passwords, OAuth tokens, API keys, database passwords, or Worker secret values.</p>`;
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === "/privacy") return publicPage("Privacy Policy", PRIVACY_HTML);
+    if (url.pathname === "/terms") return publicPage("Terms of Service", TERMS_HTML);
+    if (url.pathname === "/support") return publicPage("Support", SUPPORT_HTML);
+    if (url.pathname === "/.well-known/openai-apps-challenge") {
+      const challenge = env.OPENAI_APPS_CHALLENGE?.trim();
+      return challenge
+        ? new Response(challenge, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } })
+        : new Response("Not found", { status: 404 });
+    }
 
     if (url.pathname === "/health") {
       const [cloudflareConfigured, supabaseConfigured] = await Promise.all([
