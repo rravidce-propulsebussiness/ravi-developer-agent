@@ -86,9 +86,11 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function base64ToBytes(value: string): Uint8Array {
+function base64ToArrayBuffer(value: string): ArrayBuffer {
   const binary = atob(value);
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes.buffer;
 }
 
 async function storeProviderConnection(
@@ -126,9 +128,9 @@ async function readProviderConnection(
   const payload = JSON.parse(stored) as { version?: number; iv?: string; ciphertext?: string };
   if (payload.version !== 1 || !payload.iv || !payload.ciphertext) throw new Error("Provider connection record is invalid.");
   const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: base64ToBytes(payload.iv) },
+    { name: "AES-GCM", iv: base64ToArrayBuffer(payload.iv) },
     env.CONNECTION_ENCRYPTION_KEY,
-    base64ToBytes(payload.ciphertext),
+    base64ToArrayBuffer(payload.ciphertext),
   );
   return JSON.parse(new TextDecoder().decode(decrypted)) as Record<string, unknown>;
 }
