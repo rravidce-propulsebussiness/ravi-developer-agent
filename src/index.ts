@@ -575,13 +575,34 @@ function createServer(tenant: TenantContext, env: Env) {
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
+  const openWorldTools = new Set([
+    "github_create_branch",
+    "github_put_file",
+    "github_create_pull_request",
+    "cloudflare_trigger_build",
+    "browser_open",
+    "browser_session_start",
+    "browser_tabs",
+    "browser_tab_open",
+    "browser_tab_activate",
+    "browser_tab_close",
+    "browser_session_close",
+    "browser_screenshot",
+    "browser_page_text",
+    "browser_click",
+    "browser_type",
+    "browser_select",
+    "browser_press",
+    "browser_wait",
+    "browser_live_view",
+  ]);
   const registerTool = (name: string, config: any, handler: any) => {
     const normalizedConfig = {
       ...config,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
-        openWorldHint: true,
+        openWorldHint: openWorldTools.has(name),
         ...(config?.annotations ?? {}),
       },
     };
@@ -610,7 +631,6 @@ function createServer(tenant: TenantContext, env: Env) {
       if (!response.ok) throw new Error("Audit history is unavailable.");
       const body = await response.json() as { events?: Array<{ timestamp: number; action: string; subject: string }> };
       return result({
-        tenant: tenant.tenantId,
         retentionDays: 30,
         events: (body.events ?? []).map((event) => ({
           timestamp: new Date(event.timestamp).toISOString(),
@@ -633,7 +653,6 @@ function createServer(tenant: TenantContext, env: Env) {
       service: "Ravi Developer Agent",
       version: "0.6.0",
       transport: "MCP Streamable HTTP",
-      tenant: tenant.tenantId,
       authentication: "oauth-2.1",
       providers: {
         github: { configured: true, connected: true },
@@ -662,7 +681,6 @@ function createServer(tenant: TenantContext, env: Env) {
       id: tenant.subject,
       name: tenant.login,
       provider: "github",
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -679,7 +697,6 @@ function createServer(tenant: TenantContext, env: Env) {
       },
     },
     async ({ task, repository }: { task: string; repository?: string }) => result({
-      tenant: tenant.tenantId,
       task,
       repository: repository ?? null,
       execution: [
@@ -706,7 +723,6 @@ function createServer(tenant: TenantContext, env: Env) {
       provider: "github",
       connected: true,
       login: tenant.login,
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -930,7 +946,6 @@ function createServer(tenant: TenantContext, env: Env) {
       provider: "cloudflare",
       configured: await providerConfigured(env, "cloudflare"),
       connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -1261,7 +1276,6 @@ function createServer(tenant: TenantContext, env: Env) {
       provider: "supabase",
       configured: await providerConfigured(env, "supabase"),
       connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
-      tenant: tenant.tenantId,
     }),
   );
 
@@ -1490,7 +1504,6 @@ function createServer(tenant: TenantContext, env: Env) {
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async () => result({
-      tenant: tenant.tenantId,
       provider: "Cloudflare Browser Run",
       capabilities: [
         "persistent tenant browser sessions",
@@ -1515,7 +1528,7 @@ function createServer(tenant: TenantContext, env: Env) {
     },
     async ({ url }: { url: string }) => {
       const tab = await openTenantTab(env, tenant, url);
-      return result({ tenant: tenant.tenantId, tab });
+      return result({ tab });
     },
   );
   registerTool(
@@ -1548,12 +1561,12 @@ function createServer(tenant: TenantContext, env: Env) {
         body: JSON.stringify({ sessionId, allowedDomains }),
       });
       if (!stored.ok) throw new Error("Browser session ownership could not be stored.");
-      return result({ tenant: tenant.tenantId, browserReady: true });
+      return result({ browserReady: true });
     },
   );
   registerTool("browser_tabs", {
     title: "List Browser Tabs",
-    description: "List the current pages and live-view metadata in an existing tenant browser session.",
+    description: "List the current pages in the tenant browser session without exposing debugger or Live View credentials.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
@@ -1563,7 +1576,7 @@ function createServer(tenant: TenantContext, env: Env) {
     const response = await env.BROWSER.fetch(`https://browser-rendering/devtools/browser/${encodeURIComponent(sessionId)}/json/list`);
     if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
     const rawTabs = await response.json() as unknown[];
-    return result({ tenant: tenant.tenantId, tabs: rawTabs.map(safeTab) });
+    return result({ tabs: rawTabs.map(safeTab) });
   });
   registerTool("browser_tab_open", {
     title: "Open Browser Tab",
@@ -1573,7 +1586,7 @@ function createServer(tenant: TenantContext, env: Env) {
     inputSchema: { url: z.string().url() },
   }, async ({ url }: { url: string }) => {
     const tab = await openTenantTab(env, tenant, url);
-    return result({ tenant: tenant.tenantId, tab });
+    return result({ tab });
   });
 
   registerTool("browser_tab_activate", {
@@ -1589,7 +1602,7 @@ function createServer(tenant: TenantContext, env: Env) {
       "/json/activate/" + encodeURIComponent(targetId);
     const response = await env.BROWSER.fetch(endpoint);
     if (!response.ok) throw new Error(`Browser tab activation failed (${response.status}).`);
-    return result({ tenant: tenant.tenantId, targetId, active: true });
+    return result({ targetId, active: true });
   });
 
   registerTool("browser_tab_close", {
@@ -1606,7 +1619,7 @@ function createServer(tenant: TenantContext, env: Env) {
       "/json/close/" + encodeURIComponent(targetId);
     const response = await env.BROWSER.fetch(endpoint);
     if (!response.ok) throw new Error(`Browser tab close failed (${response.status}).`);
-    return result({ tenant: tenant.tenantId, targetId, closed: true });
+    return result({ targetId, closed: true });
   });
 
   registerTool("browser_session_close", {
@@ -1626,7 +1639,7 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!response.ok && response.status !== 404) throw new Error(`Browser session close failed (${response.status}).`);
     const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
     await env.BROWSER_SESSIONS.get(ownerId).fetch("https://browser-session/session", { method: "DELETE" });
-    return result({ tenant: tenant.tenantId, closed: true });
+    return result({ closed: true });
   });
 
   registerTool("browser_screenshot", {
@@ -1643,7 +1656,7 @@ function createServer(tenant: TenantContext, env: Env) {
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return {
-        structuredContent: { tenant: tenant.tenantId, targetId: resolvedTargetId, url: page.url() },
+        structuredContent: { targetId: resolvedTargetId, url: page.url() },
         content: [{ type: "image" as const, data: btoa(binary), mimeType: "image/png" }],
       };
     } finally {
@@ -1662,7 +1675,6 @@ function createServer(tenant: TenantContext, env: Env) {
     try {
       const visibleText = String(await page.evaluate(() => (globalThis as any).document?.body?.innerText ?? ""));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         url: page.url(),
         title: await page.title(),
@@ -1691,7 +1703,6 @@ function createServer(tenant: TenantContext, env: Env) {
       await page.click(selector);
       await new Promise((resolve) => setTimeout(resolve, 300));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         clicked: true,
         url: page.url(),
@@ -1740,7 +1751,6 @@ function createServer(tenant: TenantContext, env: Env) {
       }
       await page.type(selector, text);
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         typed: true,
         characters: text.length,
@@ -1769,7 +1779,6 @@ function createServer(tenant: TenantContext, env: Env) {
     try {
       const selected = await page.select(selector, ...values);
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         selected,
         url: page.url(),
@@ -1797,7 +1806,6 @@ function createServer(tenant: TenantContext, env: Env) {
       await page.keyboard.press(key);
       await new Promise((resolve) => setTimeout(resolve, 200));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         pressed: key,
         url: page.url(),
@@ -1824,7 +1832,6 @@ function createServer(tenant: TenantContext, env: Env) {
       if (selector) await page.waitForSelector(selector, { timeout: timeoutMs });
       else await new Promise((resolve) => setTimeout(resolve, timeoutMs));
       return result({
-        tenant: tenant.tenantId,
         targetId: resolvedTargetId,
         ready: true,
         url: page.url(),
@@ -1840,7 +1847,7 @@ function createServer(tenant: TenantContext, env: Env) {
       uri: "ui://ravi-developer-agent/browser-v1.html",
       mimeType: RESOURCE_MIME_TYPE,
       text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params) });apply(window.openai?.toolResponseMetadata);</script></body></html>`,
-      _meta: { ui: { prefersBorder: false, csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
+      _meta: { ui: { prefersBorder: false, domain: "https://ravi-developer-agent.rvrmvth.workers.dev", csp: { frameDomains: ["https://live.browser.run"] } }, "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] } },
     }],
   }));
 
@@ -1862,7 +1869,7 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!response.ok) throw new Error("Live view creation failed.");
     const liveView = await response.json();
     return {
-      structuredContent: { tenant: tenant.tenantId, browserReady: true },
+      structuredContent: { browserReady: true },
       content: [{ type: "text" as const, text: "Secure read-only browser view is ready." }],
       _meta: { liveView },
     };
