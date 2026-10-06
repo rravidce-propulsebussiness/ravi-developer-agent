@@ -847,6 +847,7 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_session_close",
     "browser_screenshot",
     "browser_page_text",
+    "browser_elements",
     "browser_click",
     "browser_type",
     "browser_profile_save",
@@ -1875,6 +1876,7 @@ function createServer(tenant: TenantContext, env: Env) {
         "persistent tenant browser sessions",
         "hostname guardrails on every browser request",
         "multiple tabs and safe page navigation",
+        "sanitized interactive-element inspection without returning form values",
         "tab activation and cleanup",
         "short-lived read-only Live View in ChatGPT",
         "persistent self-hosted browser profiles for authenticated sessions",
@@ -2104,6 +2106,48 @@ function createServer(tenant: TenantContext, env: Env) {
         text: visibleText.slice(0, 50000),
         backend: policy.backend,
       });
+    } finally {
+      browser.disconnect();
+    }
+  });
+
+  registerTool("browser_elements", {
+    title: "Inspect Browser Elements",
+    description: "Return a sanitized list of interactive page elements with labels, roles, names, placeholders, and stable attributes. Form values and secret contents are never returned.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional() },
+  }, async ({ targetId }: { targetId?: string }) => {
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend === "selfhosted") {
+      const output = await runnerAction<Record<string, unknown>>(env, policy, "elements", { targetId });
+      return result({ ...output, backend: policy.backend });
+    }
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      const elements = await page.evaluate(() => {
+        const nodes = Array.from((globalThis as any).document?.querySelectorAll?.('a,button,input,select,textarea,[role="button"],[role="link"],[contenteditable="true"]') ?? []).slice(0, 500);
+        return nodes.map((el: any) => {
+          const tag = String(el.tagName ?? "").toLowerCase();
+          const type = String(el.type ?? "").toLowerCase();
+          const haystack = [el.autocomplete, el.name, el.id, el.getAttribute?.("aria-label")].filter(Boolean).join(" ");
+          const sensitive = type === "password" || /(password|passwd|secret|token|otp|one[- ]?time|verification|2fa|mfa|cc-|card|cvv|cvc)/i.test(haystack);
+          return {
+            tag,
+            type,
+            id: String(el.id ?? "").slice(0, 160),
+            name: String(el.name ?? "").slice(0, 160),
+            role: String(el.getAttribute?.("role") ?? "").slice(0, 80),
+            text: String(el.innerText ?? el.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 240),
+            placeholder: sensitive ? "" : String(el.placeholder ?? "").slice(0, 200),
+            ariaLabel: String(el.getAttribute?.("aria-label") ?? "").slice(0, 200),
+            testId: String(el.getAttribute?.("data-testid") ?? el.getAttribute?.("data-test") ?? "").slice(0, 160),
+            disabled: Boolean(el.disabled || el.getAttribute?.("aria-disabled") === "true"),
+            sensitive,
+          };
+        });
+      });
+      return result({ targetId: resolvedTargetId, url: page.url(), title: await page.title(), elements, backend: policy.backend });
     } finally {
       browser.disconnect();
     }
