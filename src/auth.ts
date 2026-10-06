@@ -571,6 +571,21 @@ export class AuthServer extends WorkerEntrypoint<AuthEnv> {
     ]);
     return clientId && clientSecret ? { clientId, clientSecret } : null;
   }
+
+  async deleteUserData(userId: string) {
+    const oauth = authorizationServer.getOAuthApi(this.env);
+    let revokedGrants = 0;
+    for (let batch = 0; batch < 100; batch += 1) {
+      const page = await oauth.listUserGrants(userId, { limit: 50 });
+      if (!page.items.length) break;
+      for (const grant of page.items) {
+        await oauth.revokeGrant(grant.id, userId);
+        revokedGrants += 1;
+      }
+    }
+    await this.env.OAUTH_KV.delete(githubUserTokenKey(userId));
+    return { revokedGrants, githubTokenDeleted: true };
+  }
 }
 
 export default AuthServer;
