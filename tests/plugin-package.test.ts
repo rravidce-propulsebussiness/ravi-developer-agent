@@ -39,6 +39,9 @@ describe("ChatGPT plugin submission package", () => {
     const serialized = JSON.stringify(plugin).toLowerCase();
     expect(serialized).not.toContain("test_credentials");
     expect(serialized).not.toContain("reviewer_instructions");
-    expect(serialized).not.toMatch(/client_secret|access_token|api[_-]?key|password/);
+    // Safety copy may legitimately mention words such as "password" or "API key".
+    // Reject packaged credential fields and well-known token formats instead.
+    expect(serialized).not.toMatch(/"(?:client_secret|access_token|api[_-]?key|password)"\s*:\s*"[^"]+"/);
+    expect(serialized).not.toMatch(/\b(?:gh[pousr]_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|sk-[a-z0-9_-]{20,})\b/i);
   });
 });
