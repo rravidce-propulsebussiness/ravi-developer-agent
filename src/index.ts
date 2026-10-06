@@ -164,13 +164,20 @@ function createServer(tenant: TenantContext) {
     "browser_session_start",
     {
       title: "Start Browser Session",
-      description: "Start an isolated persistent cloud browser session and return its current targets for live browser viewing.",
+      description: "Start an isolated persistent cloud browser session restricted to approved hostnames.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        allowedDomains: z.array(z.string().min(1)).min(1).max(50).describe("Approved hostname patterns for this browser session"),
+      },
     },
-    async () => {
+    async ({ allowedDomains }) => {
       if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-      const response = await env.BROWSER.fetch("https://browser-rendering/devtools/browser?keep_alive=1200000&targets=true&liveViewUrlExpiresInMs=300000", { method: "POST" });
+      const response = await env.BROWSER.fetch("https://browser-rendering/devtools/browser?keep_alive=1200000&targets=true&liveViewUrlExpiresInMs=300000", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ guardrails: { allowedDomains } }),
+      });
       if (!response.ok) throw new Error(`Browser session start failed (${response.status}).`);
       const session = await response.json() as { sessionId?: string; id?: string };
       const sessionId = session.sessionId ?? session.id;
