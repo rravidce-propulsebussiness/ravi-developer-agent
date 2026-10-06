@@ -2,7 +2,10 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
-type Env = {\n  AUTH_SERVER_URL?: string;\n};
+type Env = {
+  AUTH_SERVER_URL?: string;
+  BROWSER?: Fetcher;
+};
 
 type TenantContext = {
   tenantId: string;
