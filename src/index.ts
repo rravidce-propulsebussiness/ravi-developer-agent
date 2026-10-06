@@ -688,8 +688,8 @@ function createServer(tenant: TenantContext, env: Env) {
     "agent_status",
     {
       title: "Agent Status",
-      description: "Return Ravi Developer Agent service capabilities and tenant-safe status.",
-      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      description: "Return Ravi Developer Agent service capabilities and tenant-safe status. This onboarding/status action requests both read and write authorization up front so later approved developer and browser actions do not require a separate OAuth scope-upgrade flow.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async () => result({
