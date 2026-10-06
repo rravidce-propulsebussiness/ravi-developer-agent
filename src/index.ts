@@ -600,13 +600,7 @@ function createServer(tenant: TenantContext, env: Env) {
     "github_put_file",
     "github_create_pull_request",
     "cloudflare_trigger_build",
-    "browser_open",
-    "browser_session_start",
-    "browser_tabs",
     "browser_tab_open",
-    "browser_tab_activate",
-    "browser_tab_close",
-    "browser_session_close",
     "browser_screenshot",
     "browser_page_text",
     "browser_click",
@@ -1622,31 +1616,18 @@ function createServer(tenant: TenantContext, env: Env) {
   );
 
   registerTool(
-    "browser_open",
-    {
-      title: "Open Website",
-      description: "Open a permitted HTTP/HTTPS URL in a new tab of the tenant's guarded browser session.",
-      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
-      inputSchema: { url: z.string().url() },
-    },
-    async ({ url }: { url: string }) => {
-      const tab = await openTenantTab(env, tenant, url);
-      return result({ tab });
-    },
-  );
-  registerTool(
     "browser_session_start",
     {
       title: "Start Browser Session",
       description: "Start an isolated persistent cloud browser session restricted to approved hostnames.",
-      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-      annotations: { readOnlyHint: true, destructiveHint: false },
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: {
         allowedDomains: z.array(z.string().min(1).refine(validDomainPattern, "Use a lowercase public hostname or *.subdomain pattern")).min(1).max(50).describe("Approved public hostname patterns for this browser session"),
       },
     },
     async ({ allowedDomains }: { allowedDomains: string[] }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
       if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
       const response = await env.BROWSER.fetch("https://browser-rendering/devtools/browser?keep_alive=1200000&targets=true&liveViewUrlExpiresInMs=300000", {
         method: "POST",
@@ -1684,11 +1665,12 @@ function createServer(tenant: TenantContext, env: Env) {
   });
   registerTool("browser_tab_open", {
     title: "Open Browser Tab",
-    description: "Open a permitted web URL in a new tab of the tenant's guarded browser session.",
-    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-    annotations: { readOnlyHint: true, destructiveHint: false },
+    description: "Open a permitted HTTP/HTTPS URL in a new tab of the tenant's guarded browser session.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: { url: z.string().url() },
   }, async ({ url }: { url: string }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     const tab = await openTenantTab(env, tenant, url);
     return result({ tab });
   });
@@ -1696,10 +1678,11 @@ function createServer(tenant: TenantContext, env: Env) {
   registerTool("browser_tab_activate", {
     title: "Activate Browser Tab",
     description: "Make a tab active in the tenant browser session.",
-    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/) },
   }, async ({ targetId }: { targetId: string }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
     const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) +
@@ -1819,7 +1802,7 @@ function createServer(tenant: TenantContext, env: Env) {
 
   registerTool("browser_type", {
     title: "Type Into Browser",
-    description: "Type non-secret text into a browser field after explicit confirmation. Password, one-time-code, and payment-card fields are blocked; use Interactive Browser Control for those.",
+    description: "Type non-secret text into a browser field after explicit confirmation. Passwords, API keys, tokens, one-time codes, payment-card data, and other authentication secrets are not supported.",
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: true },
     inputSchema: {
@@ -1958,11 +1941,12 @@ function createServer(tenant: TenantContext, env: Env) {
   registerTool("browser_live_view", {
     title: "Browser Live View",
     description: "Create a short-lived read-only live view for an existing browser session. Do not use browser sessions for passwords, API keys, MFA/OTP codes, payment data, or other credentials.",
-    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
-    annotations: { readOnlyHint: true, destructiveHint: false },
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {},
     _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v1.html" } },
   }, async () => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
     const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/live_view";
