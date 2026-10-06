@@ -691,7 +691,7 @@ async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: str
 }
 
 function createServer(tenant: TenantContext, env: Env) {
-  const server = new McpServer({ name: "ravi-developer-agent", version: "0.2.0" });
+  const server = new McpServer({ name: "ravi-developer-agent", version: "0.6.0" });
   // OpenAI/MCP Apps supports securitySchemes on tool descriptors, but the
   // ext-apps 2.0.3 TypeScript surface has not caught up with that field yet.
   // Keep runtime metadata standards-compliant while containing the cast here.
@@ -742,18 +742,18 @@ function createServer(tenant: TenantContext, env: Env) {
     async () => result({
       ok: true,
       service: "Ravi Developer Agent",
-      version: "0.2.0",
+      version: "0.6.0",
       transport: "MCP Streamable HTTP",
       tenant: tenant.tenantId,
       authentication: "oauth-2.1",
       providers: {
         github: { configured: true, connected: true },
         cloudflare: {
-          configured: providerConfigured(env, "cloudflare"),
+          configured: await providerConfigured(env, "cloudflare"),
           connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
         },
         supabase: {
-          configured: providerConfigured(env, "supabase"),
+          configured: await providerConfigured(env, "supabase"),
           connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
         },
       },
@@ -781,7 +781,7 @@ function createServer(tenant: TenantContext, env: Env) {
     "project_plan",
     {
       title: "Project Plan",
-      description: "Create a safe execution plan for a cloud development task before provider actions are enabled.",
+      description: "Create a safe multi-provider execution plan for a cloud development task.",
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: {
@@ -1292,6 +1292,104 @@ function createServer(tenant: TenantContext, env: Env) {
   );
 
   registerTool(
+    "cloudflare_list_builds",
+    {
+      title: "List Cloudflare Builds",
+      description: "List recent Workers Builds for an authorized Cloudflare account, including trigger and deployment status.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
+        perPage: z.number().int().min(1).max(50).default(20),
+      },
+    },
+    async ({ accountId, perPage }: { accountId: string; perPage: number }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch(
+        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
+          "/builds/builds?per_page=" + encodeURIComponent(String(perPage)),
+        { headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" } },
+      );
+      if (!response.ok) throw new Error("Cloudflare build listing failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: Array<{
+          build_uuid?: string;
+          status?: string;
+          build_outcome?: string | null;
+          created_on?: string;
+          stopped_on?: string | null;
+          trigger?: { trigger_uuid?: string; trigger_name?: string; repo_connection?: { repo_name?: string; branch?: string } };
+          build_trigger_metadata?: { commit_hash?: string; branch?: string; repo_name?: string };
+        }>;
+      };
+      if (body.success === false) throw new Error("Cloudflare build listing failed.");
+      return result({
+        provider: "cloudflare",
+        accountId,
+        builds: (body.result ?? []).map((build) => ({
+          buildUuid: build.build_uuid ?? null,
+          status: build.status ?? null,
+          outcome: build.build_outcome ?? null,
+          createdAt: build.created_on ?? null,
+          stoppedAt: build.stopped_on ?? null,
+          triggerUuid: build.trigger?.trigger_uuid ?? null,
+          triggerName: build.trigger?.trigger_name ?? null,
+          repository: build.build_trigger_metadata?.repo_name ?? build.trigger?.repo_connection?.repo_name ?? null,
+          branch: build.build_trigger_metadata?.branch ?? null,
+          commitHash: build.build_trigger_metadata?.commit_hash ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "cloudflare_get_build",
+    {
+      title: "Get Cloudflare Build",
+      description: "Read the current status and outcome of one Workers Build.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
+        buildUuid: z.string().uuid(),
+      },
+    },
+    async ({ accountId, buildUuid }: { accountId: string; buildUuid: string }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch(
+        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
+          "/builds/builds/" + encodeURIComponent(buildUuid),
+        { headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" } },
+      );
+      if (!response.ok) throw new Error("Cloudflare build lookup failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: {
+          build_uuid?: string;
+          status?: string;
+          build_outcome?: string | null;
+          created_on?: string;
+          running_on?: string | null;
+          stopped_on?: string | null;
+          preview_url?: string | null;
+        };
+      };
+      if (body.success === false) throw new Error("Cloudflare build lookup failed.");
+      return result({
+        provider: "cloudflare",
+        buildUuid: body.result?.build_uuid ?? buildUuid,
+        status: body.result?.status ?? null,
+        outcome: body.result?.build_outcome ?? null,
+        createdAt: body.result?.created_on ?? null,
+        runningAt: body.result?.running_on ?? null,
+        stoppedAt: body.result?.stopped_on ?? null,
+        previewUrl: body.result?.preview_url ?? null,
+      });
+    },
+  );
+
+  registerTool(
     "supabase_connection_status",
     {
       title: "Supabase Connection",
@@ -1366,6 +1464,46 @@ function createServer(tenant: TenantContext, env: Env) {
           status: project.status ?? null,
           organizationId: project.organization_id ?? null,
         })),
+      });
+    },
+  );
+
+  registerTool(
+    "supabase_get_project",
+    {
+      title: "Get Supabase Project",
+      description: "Read current project metadata and lifecycle status from the connected Supabase account.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { projectRef: z.string().regex(/^[a-z0-9]{20}$/) },
+    },
+    async ({ projectRef }: { projectRef: string }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const response = await fetch(
+        "https://api.supabase.com/v1/projects/" + encodeURIComponent(projectRef),
+        { headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" } },
+      );
+      if (!response.ok) throw new Error("Supabase project lookup failed (" + response.status + ").");
+      const project = await response.json() as {
+        id?: string;
+        ref?: string;
+        name?: string;
+        region?: string;
+        status?: string;
+        organization_id?: string;
+        database?: unknown;
+        created_at?: string;
+      };
+      return result({
+        provider: "supabase",
+        project: {
+          id: project.id ?? project.ref ?? projectRef,
+          name: project.name ?? null,
+          region: project.region ?? null,
+          status: project.status ?? null,
+          organizationId: project.organization_id ?? null,
+          createdAt: project.created_at ?? null,
+        },
       });
     },
   );
