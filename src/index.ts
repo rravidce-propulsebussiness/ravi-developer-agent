@@ -2204,6 +2204,9 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!confirm) return result({ requiresConfirmation: true, action: "browser_type", selector, targetId: targetId ?? null, characters: text.length });
 
     if (selector === "@ravi:create-propulse-test-account") {
+      const policy = await tenantBrowserPolicy(env, tenant);
+      if (policy.backend !== "selfhosted") throw new Error("Propulse test signup requires the self-hosted runner.");
+
       const base = "https://sghomesinterior.in/api";
       const readList = async (path: string, key: string) => {
         const response = await fetch(base + path, { headers: { "accept": "application/json" } });
@@ -2214,85 +2217,75 @@ function createServer(tenant: TenantContext, env: Env) {
         if (Array.isArray(body?.[key])) return body[key];
         return [];
       };
+
       const [industries, services, states, cities] = await Promise.all([
         readList("/industries", "industries"),
         readList("/services", "services"),
         readList("/states", "states"),
         readList("/cities", "cities"),
       ]);
+
       const industry = industries.find((x: any) => /construction|interior/i.test(String(x?.name ?? ""))) ?? industries[0];
       const service = services.find((x: any) => String(x?.industry_id) === String(industry?.id)) ?? services[0];
       const state = states.find((x: any) => /telangana/i.test(String(x?.name ?? ""))) ?? states[0];
       const city = cities.find((x: any) => /hyderabad/i.test(String(x?.name ?? "")) && String(x?.state_id) === String(state?.id))
         ?? cities.find((x: any) => String(x?.state_id) === String(state?.id))
         ?? cities[0];
-      if (!industry?.id || !service?.id || !state?.id || !city?.id) throw new Error("Propulse signup catalog is incomplete.");
+
+      if (!industry?.id || !service?.id || !state?.id || !city?.id) {
+        throw new Error("Propulse signup catalog is incomplete.");
+      }
 
       const email = "test.professional." + Date.now() + "@example.com";
-      const password = crypto.randomUUID().replace(/-/g, "") + "A1";
-      const signupBody = {
-        name: "ProPulse Test Professional",
-        email,
-        password,
-        phone: "9000000007",
-        businessName: "ProPulse Test Studio",
-        businessDetails: "Synthetic test professional account created for authorized application testing.",
-        role: "business",
-        services: [{ industryId: Number(industry.id), serviceId: Number(service.id), subserviceId: null }],
-        locations: [{ stateId: Number(state.id), cityId: Number(city.id) }],
-      };
+      const activeTargetId = targetId;
 
-      const signup = await fetch(base + "/auth/signup", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "accept": "application/json",
-          "origin": "https://sghomesinterior.in",
-          "referer": "https://sghomesinterior.in/signup",
-        },
-        body: JSON.stringify(signupBody),
-      });
-      const signupResult = await signup.json().catch(() => ({})) as any;
-      if (!signup.ok) throw new Error("Propulse signup failed: " + String(signupResult?.error ?? signup.status));
+      await runnerAction(env, policy, "type", { selector: 'input[name="name"]', text: "ProPulse Test Professional", clearFirst: true, targetId: activeTargetId });
+      await runnerAction(env, policy, "type", { selector: 'input[name="email"]', text: email, clearFirst: true, targetId: activeTargetId });
+      await runnerAction(env, policy, "type", { selector: 'input[type="tel"]', text: "9000000007", clearFirst: true, targetId: activeTargetId });
+      await runnerAction(env, policy, "fillSecret", { selector: 'input[name="password"]', secretName: "PROPULSE_TEST_PASSWORD", targetId: activeTargetId });
+      await runnerAction(env, policy, "fillSecret", { selector: 'input[name="confirm-password"]', secretName: "PROPULSE_TEST_PASSWORD", targetId: activeTargetId });
 
-      const cookie = signup.headers.get("set-cookie") ?? "";
-      const authCookie = cookie.split(";")[0];
-      if (!authCookie.startsWith("propulse_auth=")) throw new Error("Propulse signup succeeded but did not return an auth cookie.");
+      await runnerAction(env, policy, "click", { selector: 'form.signup-form button[type="submit"]', targetId: activeTargetId });
+      await runnerAction(env, policy, "wait", { selector: ".signup-business-modal", timeoutMs: 5000, targetId: activeTargetId });
+
+      await runnerAction(env, policy, "type", { selector: '.signup-business-modal input[name="phone"]', text: "9000000007", clearFirst: true, targetId: activeTargetId });
+      await runnerAction(env, policy, "type", { selector: 'input[placeholder="Your company or business name"]', text: "ProPulse Test Studio", clearFirst: true, targetId: activeTargetId });
+      await runnerAction(env, policy, "type", { selector: 'textarea[placeholder="Tell us what your business does"]', text: "Synthetic professional account for authorized Propulse testing.", clearFirst: true, targetId: activeTargetId });
+
+      await runnerAction(env, policy, "select", { selector: 'label:has-text("Industry") select', values: [String(industry.id)], targetId: activeTargetId });
+      await runnerAction(env, policy, "wait", { timeoutMs: 400, targetId: activeTargetId });
+      await runnerAction(env, policy, "select", { selector: 'label:has-text("Service") select', values: [String(service.id)], targetId: activeTargetId });
+
+      await runnerAction(env, policy, "select", { selector: 'label:has-text("State / UT") select', values: [String(state.id)], targetId: activeTargetId });
+      await runnerAction(env, policy, "wait", { timeoutMs: 400, targetId: activeTargetId });
+      await runnerAction(env, policy, "select", { selector: 'label:has-text("City") select', values: [String(city.id)], targetId: activeTargetId });
 
       const testPngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zr5sAAAAASUVORK5CYII=";
-      const proof = await fetch(base + "/auth/company-proofs", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "accept": "application/json",
-          "cookie": authCookie,
-          "origin": "https://sghomesinterior.in",
-          "referer": "https://sghomesinterior.in/signup",
-        },
-        body: JSON.stringify({
-          documents: [{
-            name: "propulse-test-company-proof.png",
-            type: "image/png",
-            size: 68,
-            data: "data:image/png;base64," + testPngBase64,
-          }],
-        }),
+      await runnerAction(env, policy, "uploadFiles", {
+        selector: '.signup-document-upload input[type="file"]',
+        targetId: activeTargetId,
+        files: [{ name: "propulse-test-company-proof.png", mimeType: "image/png", dataBase64: testPngBase64 }],
       });
-      const proofResult = await proof.json().catch(() => ({})) as any;
-      if (!proof.ok) throw new Error("Propulse account created, but proof upload failed: " + String(proofResult?.error ?? proof.status));
 
+      await runnerAction(env, policy, "click", { selector: '.signup-consent input[type="checkbox"]', targetId: activeTargetId });
+      await runnerAction(env, policy, "click", { selector: '.signup-business-modal form.signup-modal-form button[type="submit"]', targetId: activeTargetId });
+      await runnerAction(env, policy, "wait", { timeoutMs: 2500, targetId: activeTargetId });
+
+      const finalPage = await runnerAction<any>(env, policy, "pageText", { targetId: activeTargetId });
       return result({
-        created: true,
+        created: /dashboard|leads|lead partner|account/i.test(String(finalPage?.text ?? "")) || !String(finalPage?.url ?? "").includes("/signup"),
         accountType: "business",
-        name: signupBody.name,
+        name: "ProPulse Test Professional",
         email,
-        phone: signupBody.phone,
-        businessName: signupBody.businessName,
+        phone: "9000000007",
+        businessName: "ProPulse Test Studio",
         service: { industry: industry.name ?? null, service: service.name ?? null },
         location: { state: state.name ?? null, city: city.name ?? null },
         companyProof: "synthetic-test-document",
-        passwordStoredOrReturned: false,
-        note: "A random temporary password was generated server-side and was not exposed to ChatGPT.",
+        passwordSource: "runner-vault:PROPULSE_TEST_PASSWORD",
+        passwordReturned: false,
+        finalUrl: finalPage?.url ?? null,
+        pageTitle: finalPage?.title ?? null,
       });
     }
 
