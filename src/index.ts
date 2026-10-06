@@ -103,6 +103,31 @@ function createServer(tenant: TenantContext) {
     }),
   );
 
+  server.registerTool(
+    "browser_open",
+    {
+      title: "Open Website",
+      description: "Open a public HTTP/HTTPS URL in the tenant cloud browser. Private/local network targets are rejected.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { url: z.string().url() },
+    },
+    async ({ url }) => {
+      const target = new URL(url);
+      if (!["http:", "https:"].includes(target.protocol)) throw new Error("Only HTTP/HTTPS URLs are allowed.");
+      const host = target.hostname.toLowerCase();
+      if (host === "localhost" || host === "::1" || host.endsWith(".local") || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) throw new Error("Private/local network targets are not allowed.");
+      if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+      const response = await env.BROWSER.fetch("https://browser-rendering/snapshot", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: target.toString() }),
+      });
+      if (!response.ok) throw new Error(`Browser navigation failed (${response.status}).`);
+      const body = await response.text();
+      return result({ tenant: tenant.tenantId, url: target.toString(), snapshot: body.slice(0, 50000) });
+    },
+  );
   return server;
 }
 
