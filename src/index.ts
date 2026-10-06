@@ -42,21 +42,24 @@ export class TenantBrowserSession extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/session") {
-      const body = await request.json() as { sessionId?: string; allowedDomains?: string[]; backend?: "cloudflare" | "selfhosted" };
+      const body = await request.json() as { sessionId?: string; allowedDomains?: string[]; backend?: "cloudflare" | "selfhosted"; profileName?: string | null };
       if (!body.sessionId || !body.allowedDomains?.length) return new Response("invalid_session", { status: 400 });
       await this.ctx.storage.put("sessionId", body.sessionId);
       await this.ctx.storage.put("allowedDomains", body.allowedDomains);
       await this.ctx.storage.put("backend", body.backend ?? "cloudflare");
+      if (body.profileName) await this.ctx.storage.put("profileName", body.profileName);
+      else await this.ctx.storage.delete("profileName");
       return Response.json({ ok: true });
     }
     if (request.method === "GET" && url.pathname === "/session") {
       const sessionId = await this.ctx.storage.get<string>("sessionId");
       const allowedDomains = await this.ctx.storage.get<string[]>("allowedDomains");
       const backend = await this.ctx.storage.get<"cloudflare" | "selfhosted">("backend");
-      return sessionId ? Response.json({ sessionId, allowedDomains: allowedDomains ?? [], backend: backend ?? "cloudflare" }) : new Response("session_not_found", { status: 404 });
+      const profileName = await this.ctx.storage.get<string>("profileName");
+      return sessionId ? Response.json({ sessionId, allowedDomains: allowedDomains ?? [], backend: backend ?? "cloudflare", profileName: profileName ?? null }) : new Response("session_not_found", { status: 404 });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
-      await this.ctx.storage.delete(["sessionId", "allowedDomains", "backend"]);
+      await this.ctx.storage.delete(["sessionId", "allowedDomains", "backend", "profileName"]);
       return Response.json({ ok: true });
     }
     return new Response("not_found", { status: 404 });
@@ -552,7 +555,7 @@ async function providerOAuthCallback(request: Request, env: Env, provider: Provi
 }
 
 type BrowserBackendKind = "cloudflare" | "selfhosted";
-type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[]; backend: BrowserBackendKind };
+type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[]; backend: BrowserBackendKind; profileName?: string | null };
 
 function selfHostedBrowserConfigured(env: Env): boolean {
   return Boolean(env.SELF_HOSTED_BROWSER_URL && env.SELF_HOSTED_BROWSER_TOKEN);
@@ -697,9 +700,9 @@ async function tenantBrowserPolicy(env: Env, tenant: TenantContext): Promise<Ten
   const id = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
   const response = await env.BROWSER_SESSIONS.get(id).fetch("https://browser-session/session");
   if (!response.ok) throw new Error("No active browser session for this tenant.");
-  const body = await response.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
+  const body = await response.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind; profileName?: string | null };
   if (!body.sessionId || !body.allowedDomains?.length) throw new Error("Tenant browser session is invalid.");
-  return { sessionId: body.sessionId, allowedDomains: body.allowedDomains, backend: body.backend ?? "cloudflare" };
+  return { sessionId: body.sessionId, allowedDomains: body.allowedDomains, backend: body.backend ?? "cloudflare", profileName: body.profileName ?? null };
 }
 
 async function tenantSessionId(env: Env, tenant: TenantContext): Promise<string> {
@@ -846,6 +849,10 @@ function createServer(tenant: TenantContext, env: Env) {
     "browser_page_text",
     "browser_click",
     "browser_type",
+    "browser_profile_save",
+    "browser_vault_names",
+    "browser_fill_secret",
+    "browser_upload_files",
     "browser_select",
     "browser_press",
     "browser_wait",
@@ -1886,9 +1893,10 @@ function createServer(tenant: TenantContext, env: Env) {
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: {
         allowedDomains: z.array(z.string().min(1).refine(validDomainPattern, "Use a lowercase public hostname or *.subdomain pattern")).min(1).max(50).describe("Approved public hostname patterns for this browser session"),
+        profileName: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/).optional().describe("Optional persistent self-hosted browser profile name. Stores only browser cookies/storage on the user's runner, never passwords in ChatGPT."),
       },
     },
-    async ({ allowedDomains }: { allowedDomains: string[] }) => {
+    async ({ allowedDomains, profileName }: { allowedDomains: string[]; profileName?: string }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
       const requestedDomains = [...new Set(allowedDomains.map((domain) => domain.trim().toLowerCase()))].sort();
       const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
@@ -1897,15 +1905,16 @@ function createServer(tenant: TenantContext, env: Env) {
 
       const existingResponse = await owner.fetch("https://browser-session/session");
       if (existingResponse.ok) {
-        const existing = await existingResponse.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
+        const existing = await existingResponse.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind; profileName?: string | null };
         if (existing.sessionId) {
           const policy: TenantBrowserPolicy = {
             sessionId: existing.sessionId,
             allowedDomains: existing.allowedDomains ?? [],
             backend: existing.backend ?? "cloudflare",
+            profileName: existing.profileName ?? null,
           };
           const existingDomains = [...new Set(policy.allowedDomains.map((domain) => domain.trim().toLowerCase()))].sort();
-          const samePolicy = JSON.stringify(existingDomains) === JSON.stringify(requestedDomains);
+          const samePolicy = JSON.stringify(existingDomains) === JSON.stringify(requestedDomains) && (policy.profileName ?? null) === (profileName ?? null);
           const alive = await browserSessionAlive(env, policy);
           if (alive && samePolicy && policy.backend === preferredBackend) {
             return result({ browserReady: true, reused: true, backend: policy.backend });
@@ -1921,12 +1930,13 @@ function createServer(tenant: TenantContext, env: Env) {
 
       if (preferredBackend === "selfhosted") {
         try {
-          const session = await runnerJson<{ sessionId?: string }>(env, "/v1/sessions", {
+          const session = await runnerJson<{ sessionId?: string; profileName?: string | null; profileLoaded?: boolean }>(env, "/v1/sessions", {
             method: "POST",
-            body: JSON.stringify({ allowedDomains: requestedDomains }),
+            body: JSON.stringify({ allowedDomains: requestedDomains, profileName: profileName ?? null }),
           });
           sessionId = session.sessionId ?? "";
         } catch (error) {
+          if (profileName) throw new Error("Persistent browser profiles require the self-hosted runner to be available.");
           if (!env.BROWSER) throw error;
           backend = "cloudflare";
           fallbackFromSelfHosted = true;
@@ -1934,6 +1944,7 @@ function createServer(tenant: TenantContext, env: Env) {
       }
 
       if (backend === "cloudflare") {
+        if (profileName) throw new Error("Persistent browser profiles are available only on the self-hosted runner.");
         if (!env.BROWSER) throw new Error("No browser backend is available. Configure the self-hosted runner or Cloudflare Browser Run.");
         const browserRun = env.BROWSER as any;
         const session = await browserRun.acquire({
@@ -1949,13 +1960,13 @@ function createServer(tenant: TenantContext, env: Env) {
       const stored = await owner.fetch("https://browser-session/session", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, allowedDomains: requestedDomains, backend }),
+        body: JSON.stringify({ sessionId, allowedDomains: requestedDomains, backend, profileName: profileName ?? null }),
       });
       if (!stored.ok) {
         await closeBackendSession(env, { sessionId, allowedDomains: requestedDomains, backend });
         throw new Error("Browser session ownership could not be stored.");
       }
-      return result({ browserReady: true, reused: false, backend, fallbackFromSelfHosted });
+      return result({ browserReady: true, reused: false, backend, fallbackFromSelfHosted, profileName: profileName ?? null });
     },
   );
 
@@ -2040,12 +2051,13 @@ function createServer(tenant: TenantContext, env: Env) {
     const response = await owner.fetch("https://browser-session/session");
     let backend: BrowserBackendKind | null = null;
     if (response.ok) {
-      const stored = await response.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind };
+      const stored = await response.json() as { sessionId?: string; allowedDomains?: string[]; backend?: BrowserBackendKind; profileName?: string | null };
       if (stored.sessionId) {
         const policy: TenantBrowserPolicy = {
           sessionId: stored.sessionId,
           allowedDomains: stored.allowedDomains ?? [],
           backend: stored.backend ?? "cloudflare",
+          profileName: stored.profileName ?? null,
         };
         backend = policy.backend;
         await closeBackendSession(env, policy);
@@ -2180,6 +2192,80 @@ function createServer(tenant: TenantContext, env: Env) {
     } finally {
       browser.disconnect();
     }
+  });
+
+
+  registerTool("browser_profile_save", {
+    title: "Save Browser Profile",
+    description: "Persist the current self-hosted browser cookies and site storage into the named local runner profile. Passwords are not exported to ChatGPT. Use after the user has completed a provider-controlled sign-in.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: false },
+    inputSchema: { confirm: z.boolean().default(false) },
+  }, async ({ confirm }: { confirm: boolean }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!confirm) return result({ requiresConfirmation: true, action: "browser_profile_save" });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend !== "selfhosted") throw new Error("Persistent browser profiles are available only on the self-hosted runner.");
+    if (!policy.profileName) throw new Error("Start the browser session with profileName before saving a profile.");
+    const output = await runnerAction<Record<string, unknown>>(env, policy, "saveProfile");
+    return result({ ...output, backend: policy.backend });
+  });
+
+  registerTool("browser_vault_names", {
+    title: "List Browser Vault Names",
+    description: "List runner-side browser secret aliases that are available for secure field injection. Secret values are never returned.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: {},
+  }, async () => {
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend !== "selfhosted") throw new Error("Runner-side browser secrets require the self-hosted runner.");
+    const output = await runnerAction<{ names?: string[] }>(env, policy, "vaultNames");
+    return result({ names: output.names ?? [], backend: policy.backend });
+  });
+
+  registerTool("browser_fill_secret", {
+    title: "Fill Runner Secret",
+    description: "Fill a browser field from a secret stored only on the self-hosted runner. The secret value is never sent to ChatGPT, returned in tool output, or written to audit payloads. Use for passwords or provider environment-secret values only after explicit confirmation.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {
+      selector: z.string().min(1).max(1000),
+      secretName: z.string().regex(/^[A-Za-z0-9_]{1,80}$/),
+      targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+      confirm: z.boolean().default(false),
+    },
+  }, async ({ selector, secretName, targetId, confirm }: { selector: string; secretName: string; targetId?: string; confirm: boolean }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!confirm) return result({ requiresConfirmation: true, action: "browser_fill_secret", selector, secretName: secretName.toLowerCase(), targetId: targetId ?? null });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend !== "selfhosted") throw new Error("Runner-side browser secrets require the self-hosted runner.");
+    const output = await runnerAction<Record<string, unknown>>(env, policy, "fillSecret", { selector, secretName, targetId });
+    return result({ ...output, backend: policy.backend });
+  });
+
+  registerTool("browser_upload_files", {
+    title: "Upload Browser Files",
+    description: "Attach up to eight small files to a browser file input after explicit confirmation. File content is sent only to the requested website through the guarded browser session.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {
+      selector: z.string().min(1).max(1000),
+      files: z.array(z.object({
+        name: z.string().min(1).max(180).regex(/^[A-Za-z0-9._() -]+$/),
+        mimeType: z.string().min(1).max(120),
+        dataBase64: z.string().min(1).max(7_000_000),
+      })).min(1).max(8),
+      targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+      confirm: z.boolean().default(false),
+    },
+  }, async ({ selector, files, targetId, confirm }: { selector: string; files: Array<{ name: string; mimeType: string; dataBase64: string }>; targetId?: string; confirm: boolean }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!confirm) return result({ requiresConfirmation: true, action: "browser_upload_files", selector, targetId: targetId ?? null, files: files.map((file) => ({ name: file.name, mimeType: file.mimeType })) });
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (policy.backend !== "selfhosted") throw new Error("Browser file uploads currently require the self-hosted runner.");
+    const output = await runnerAction<Record<string, unknown>>(env, policy, "uploadFiles", { selector, files, targetId });
+    return result({ ...output, backend: policy.backend });
   });
 
   registerTool("browser_select", {
