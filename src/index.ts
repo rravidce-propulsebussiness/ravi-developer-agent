@@ -1270,6 +1270,100 @@ form.addEventListener("submit",async e=>{
     },
   );
 
+  registerAppResource(server, "cloudflare-secret-manager", "ui://ravi-developer-agent/cloudflare-secret-v1.html", {}, async () => ({
+    contents: [{
+      uri: "ui://ravi-developer-agent/cloudflare-secret-v1.html",
+      mimeType: RESOURCE_MIME_TYPE,
+      text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{color-scheme:light dark}*{box-sizing:border-box}body{font-family:system-ui;margin:0;padding:18px;background:transparent}.card{border:1px solid color-mix(in srgb,currentColor 18%,transparent);border-radius:16px;padding:18px;max-width:720px;margin:auto}h2{margin:0 0 8px}.muted{opacity:.7;font-size:.92rem}label{display:block;margin-top:13px;font-weight:650}input{width:100%;margin-top:6px;padding:10px 11px;border-radius:9px;border:1px solid color-mix(in srgb,currentColor 25%,transparent);background:transparent;color:inherit}button{margin-top:18px;padding:10px 15px;border:0;border-radius:9px;font-weight:700;cursor:pointer}.status{margin-top:13px;min-height:1.4em}</style></head>
+<body><div class="card"><h2>Cloudflare Worker secret</h2><p class="muted">The secret value is sent directly from this UI to the app-only MCP tool and is never returned in model-visible output.</p>
+<form id="form">
+<label>Account ID<input id="account" required pattern="[A-Fa-f0-9]{32}" autocomplete="off"></label>
+<label>Worker name<input id="script" required pattern="[a-z0-9_][a-z0-9-_]*" autocomplete="off"></label>
+<label>Secret name<input id="name" required pattern="[A-Za-z_][A-Za-z0-9_]*" autocomplete="off"></label>
+<label>Secret value<input id="value" required type="password" autocomplete="new-password"></label>
+<button id="save" type="submit">Save secret</button><div class="status" id="status"></div></form></div>
+<script>
+const form=document.getElementById("form"),status=document.getElementById("status"),save=document.getElementById("save");
+const account=document.getElementById("account"),script=document.getElementById("script"),name=document.getElementById("name"),value=document.getElementById("value");
+function prefill(v){const x=v?.structuredContent||v||window.openai?.toolOutput||{};if(x.accountId&&!account.value)account.value=x.accountId;if(x.scriptName&&!script.value)script.value=x.scriptName}
+prefill(window.openai?.toolOutput);
+window.addEventListener("message",e=>{if(e.data?.method==="ui/notifications/tool-result")prefill(e.data.params)});
+form.addEventListener("submit",async e=>{
+ e.preventDefault();
+ if(!window.openai?.callTool){status.textContent="This host does not support direct app tool calls.";return}
+ save.disabled=true;status.textContent="Saving…";
+ const secret=value.value;
+ try{
+  const res=await window.openai.callTool("cloudflare_set_worker_secret_ui",{accountId:account.value.trim(),scriptName:script.value.trim(),secretName:name.value.trim(),secretValue:secret});
+  value.value="";
+  const out=res?.structuredContent||res?.content?.[0]?.text||res;
+  status.textContent=typeof out==="string"?out:(out?.saved?"Secret saved.":"Request completed.");
+ }catch{status.textContent="Could not save the secret."}
+ finally{save.disabled=false}
+});
+</script></body></html>`,
+      _meta: { ui: { prefersBorder: true } },
+    }],
+  }));
+
+  registerTool(
+    "cloudflare_secret_manager",
+    {
+      title: "Manage Cloudflare Worker Secret",
+      description: "Open a secure app UI for creating or replacing a Cloudflare Worker secret without exposing the secret value to the model.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/).optional(),
+        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/).optional(),
+      },
+      _meta: { ui: { resourceUri: "ui://ravi-developer-agent/cloudflare-secret-v1.html" } },
+    },
+    async ({ accountId, scriptName }: { accountId?: string; scriptName?: string }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      return result({ provider: "cloudflare", accountId: accountId ?? null, scriptName: scriptName ?? null, secureEntry: true });
+    },
+  );
+
+  registerTool(
+    "cloudflare_set_worker_secret_ui",
+    {
+      title: "Store Cloudflare Worker Secret",
+      description: "UI-only operation used by the secure secret manager to create or replace one Worker secret. The secret value is never returned.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: {
+        accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/),
+        scriptName: z.string().regex(/^[a-z0-9_][a-z0-9-_]*$/),
+        secretName: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+        secretValue: z.string().min(1).max(65536),
+      },
+      _meta: { ui: { visibility: ["app"] } },
+    },
+    async ({ accountId, scriptName, secretName, secretValue }: { accountId: string; scriptName: string; secretName: string; secretValue: string }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch(
+        "https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) +
+          "/workers/scripts/" + encodeURIComponent(scriptName) + "/secrets",
+        {
+          method: "PUT",
+          headers: {
+            authorization: "Bearer " + connection.accessToken,
+            accept: "application/json",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ name: secretName, type: "secret_text", text: secretValue }),
+        },
+      );
+      if (!response.ok) throw new Error("Cloudflare Worker secret update failed (" + response.status + ").");
+      const body = await response.json() as { success?: boolean };
+      if (body.success === false) throw new Error("Cloudflare Worker secret update failed.");
+      return result({ provider: "cloudflare", accountId, scriptName, secretName, saved: true });
+    },
+  );
+
   registerTool(
     "cloudflare_list_worker_secrets",
     {
