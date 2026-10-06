@@ -6,6 +6,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "browser": { "binding": "BROWSER" },
+  "services": [
+    { "binding": "AUTH_SERVER", "service": "ravi-developer-agent-auth", "entrypoint": "AuthServer" }
+  ],
   "durable_objects": {
     "bindings": [{ "name": "BROWSER_SESSIONS", "class_name": "TenantBrowserSession" }]
   },
