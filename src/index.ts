@@ -1,11 +1,34 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
+import { DurableObject } from "cloudflare:workers";
 
 type Env = {
   AUTH_SERVER_URL?: string;
   BROWSER?: Fetcher;
+  BROWSER_SESSIONS: DurableObjectNamespace<TenantBrowserSession>;
 };
+
+export class TenantBrowserSession extends DurableObject<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "PUT" && url.pathname === "/session") {
+      const body = await request.json() as { sessionId?: string };
+      if (!body.sessionId) return new Response("invalid_session", { status: 400 });
+      await this.ctx.storage.put("sessionId", body.sessionId);
+      return Response.json({ ok: true });
+    }
+    if (request.method === "GET" && url.pathname === "/session") {
+      const sessionId = await this.ctx.storage.get<string>("sessionId");
+      return sessionId ? Response.json({ sessionId }) : new Response("session_not_found", { status: 404 });
+    }
+    if (request.method === "DELETE" && url.pathname === "/session") {
+      await this.ctx.storage.delete("sessionId");
+      return Response.json({ ok: true });
+    }
+    return new Response("not_found", { status: 404 });
+  }
+}
 
 type TenantContext = {
   tenantId: string;
