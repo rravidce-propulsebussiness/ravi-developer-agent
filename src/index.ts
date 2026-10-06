@@ -29,7 +29,12 @@ function createServer(tenant: TenantContext) {
 
   server.registerTool(
     "agent_status",
-    { description: "Return Ravi Developer Agent service capabilities and tenant-safe status." },
+    {
+      title: "Agent Status",
+      description: "Return Ravi Developer Agent service capabilities and tenant-safe status.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
     async () => result({
       ok: true,
       service: "Ravi Developer Agent",
@@ -44,7 +49,10 @@ function createServer(tenant: TenantContext) {
   server.registerTool(
     "project_plan",
     {
+      title: "Project Plan",
       description: "Create a safe execution plan for a cloud development task before provider actions are enabled.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: {
         task: z.string().min(1).describe("Development task to plan"),
         repository: z.string().optional().describe("owner/repository when known"),
