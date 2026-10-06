@@ -66,6 +66,10 @@ GitHub provider tokens are kept inside OAuth token properties and are not emitte
 - The public plugin does not collect passwords, API keys, MFA/OTP codes, payment-card data, or other authentication secrets.
 - Business OS / Propulse infrastructure is not used by Ravi Developer Agent.
 
+### Self-service deletion
+
+Authenticated users can call `delete_my_data`. It requires explicit destructive confirmation and deletes Ravi Developer Agent's tenant-scoped provider connections, browser-session state, audit/rate records, stored GitHub user-token state, and Ravi Developer Agent OAuth grants. It does **not** delete GitHub repositories, Cloudflare resources, Supabase projects/databases, or data held independently by visited websites.
+
 ## One-time publisher bootstrap
 
 ### 1. Create the GitHub App

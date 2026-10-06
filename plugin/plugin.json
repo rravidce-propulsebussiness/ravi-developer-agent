@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "ravi-developer-agent",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "description": "A tenant-isolated developer agent for GitHub, Cloudflare, Supabase, deployment workflows, and secure cloud-browser testing.",
   "author": {
     "name": "Ravi Developer Agent",
@@ -9,13 +9,20 @@
   },
   "homepage": "https://ravi-developer-agent.rvrmvth.workers.dev",
   "repository": "https://github.com/rravidce-propulsebussiness/ravi-developer-agent",
-  "keywords": ["developer-tools", "github", "cloudflare", "supabase", "browser-automation", "deployment"],
+  "keywords": [
+    "developer-tools",
+    "github",
+    "cloudflare",
+    "supabase",
+    "browser-automation",
+    "deployment"
+  ],
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "Ravi Developer Agent",
         "shortDescription": "Build, deploy, and test apps",
-        "longDescription": "Work with authorized GitHub repositories, Cloudflare deployments, Supabase projects, and a tenant-isolated cloud browser. Read operations are separated from state-changing tools, consequential actions require confirmation, provider credentials stay server-side, and sensitive browser or Worker-secret entry uses dedicated human-only flows.",
+        "longDescription": "Work with authorized GitHub repositories, Cloudflare deployments, Supabase projects, and a tenant-isolated cloud browser. Read operations are separated from state-changing tools, consequential actions require confirmation, provider credentials stay server-side, and authentication secrets are handled only by provider-controlled OAuth flows.",
         "developerName": "Ravi Developer Agent",
         "category": "Developer Tools",
         "capabilities": [
@@ -23,7 +30,7 @@
           "Cloudflare deployment operations",
           "Supabase database operations",
           "Cloud browser testing",
-          "Interactive secure sign-in",
+          "Provider OAuth sign-in",
           "Audit history"
         ],
         "websiteURL": "https://ravi-developer-agent.rvrmvth.workers.dev",
@@ -73,6 +80,12 @@
               "prompt": "Start a browser session restricted to example.com and open https://example.com.",
               "tools_triggered": "browser_session_start, browser_open",
               "expected_behavior": "Create a tenant-isolated browser session with an explicit hostname allowlist and open only the allowed destination."
+            },
+            {
+              "description": "Self-service Ravi Developer Agent data deletion",
+              "prompt": "Delete my Ravi Developer Agent data.",
+              "tools_triggered": "delete_my_data",
+              "expected_behavior": "Require explicit destructive confirmation before deleting tenant-scoped provider connections, browser state, audit/rate records, stored GitHub user-token state, and Ravi Developer Agent OAuth grants. Do not delete external provider resources."
             }
           ],
           "negative": [
@@ -96,7 +109,7 @@
         "commerce": false
       },
       "publication": {
-        "release_notes": "Initial packaged release of the tenant-isolated GitHub, Cloudflare, Supabase, and secure cloud-browser developer agent."
+        "release_notes": "Production 1.0 release with tenant-isolated OAuth, GitHub/Cloudflare/Supabase tools, guarded cloud browser, audit/rate controls, public legal endpoints, and self-service Ravi Developer Agent data deletion."
       }
     }
   }
