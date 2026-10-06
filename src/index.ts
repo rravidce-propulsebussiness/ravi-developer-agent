@@ -186,6 +186,22 @@ function createServer(tenant: TenantContext) {
     for (const byte of bytes) binary += String.fromCharCode(byte);
     return { content: [{ type: "image", data: btoa(binary), mimeType: "image/png" }] };
   });
+  server.registerTool("browser_live_view", {
+    title: "Browser Live View",
+    description: "Create a short-lived read-only live view for an existing browser session.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: { sessionId: z.string().uuid() },
+  }, async ({ sessionId }) => {
+    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
+    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/live_view";
+    const response = await env.BROWSER.fetch(endpoint, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expiresInMs: 300000, mode: "tab", guardrails: { mode: "readonly" } }),
+    });
+    if (!response.ok) throw new Error("Live view creation failed.");
+    return result({ tenant: tenant.tenantId, liveView: await response.json() });
+  });
   return server;
 }
 
