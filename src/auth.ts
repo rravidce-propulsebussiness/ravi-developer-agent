@@ -190,7 +190,7 @@ async function githubManifestPage(env: AuthEnv): Promise<Response> {
     callback_urls: [GITHUB_CALLBACK, PROVIDER_SETUP_CALLBACK],
     description: "Tenant-isolated developer agent for GitHub, cloud deployment, and browser testing.",
     public: true,
-    request_oauth_on_install: true,
+    request_oauth_on_install: false,
     default_events: [],
     default_permissions: {
       metadata: "read",
@@ -444,6 +444,20 @@ async function authorize(request: Request, env: AuthEnv): Promise<Response> {
   }
 }
 
+function githubInstallationCompletePage(request: Request): Response {
+  const url = new URL(request.url);
+  const installationId = url.searchParams.get("installation_id") ?? "";
+  const safeInstallationId = installationId.replace(/[^0-9]/g, "");
+  return new Response(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ravi Developer Agent installed</title><style>body{font-family:system-ui;background:#0f1115;color:#f5f7fb;display:grid;place-items:center;min-height:100vh;margin:0}.card{max-width:620px;padding:28px;border:1px solid #2a3040;border-radius:18px;background:#171a21}.ok{color:#89e59a}.muted{color:#aeb7c8}code{word-break:break-all}</style><div class="card"><h1 class="ok">GitHub App installed</h1><p>Ravi Developer Agent has been installed successfully.</p>${safeInstallationId ? `<p class="muted">Installation ID: <code>${safeInstallationId}</code></p>` : ""}<p>You can close this tab and return to ChatGPT to connect the MCP plugin.</p></div>`, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      "x-frame-options": "DENY",
+    },
+  });
+}
+
 async function githubCallback(request: Request, env: AuthEnv): Promise<Response> {
   const client = await githubClient(env);
   if (!client) {
@@ -536,6 +550,9 @@ export class AuthServer extends WorkerEntrypoint<AuthEnv> {
     if (url.pathname === "/setup/providers/callback") return providerSetupCallback(request, this.env);
     if (url.pathname === "/setup/providers/form") return providerSetupForm(request, this.env);
     if (url.pathname === "/authorize") return authorize(request, this.env);
+    if (url.pathname === "/callback" && url.searchParams.get("setup_action") === "install" && url.searchParams.get("installation_id")) {
+      return githubInstallationCompletePage(request);
+    }
     if (url.pathname === "/callback") return githubCallback(request, this.env);
     return authorizationServer.fetch(request, this.env, this.ctx);
   }
