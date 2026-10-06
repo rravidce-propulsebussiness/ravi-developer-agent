@@ -2028,6 +2028,10 @@ function createServer(tenant: TenantContext, env: Env) {
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: { targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional() },
+    _meta: {
+      ui: { visibility: ["model", "app"] },
+      "openai/widgetAccessible": true,
+    },
   }, async ({ targetId }: { targetId?: string }) => {
     const policy = await tenantBrowserPolicy(env, tenant);
     if (policy.backend === "selfhosted") {
@@ -2261,10 +2265,10 @@ function createServer(tenant: TenantContext, env: Env) {
     }
   });
 
-  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v3.html", {}, async () => {
+  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v4.html", {}, async () => {
     return {
       contents: [{
-        uri: "ui://ravi-developer-agent/browser-v3.html",
+        uri: "ui://ravi-developer-agent/browser-v4.html",
         mimeType: RESOURCE_MIME_TYPE,
         text: `<!doctype html>
 <html>
@@ -2274,66 +2278,52 @@ function createServer(tenant: TenantContext, env: Env) {
 <style>
 html,body{width:100%;height:100%;margin:0;background:#07111c;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
 #root{position:relative;width:100%;height:100%;display:grid;place-items:center}
-#status{position:absolute;left:12px;bottom:12px;z-index:3;padding:7px 10px;border-radius:999px;background:rgba(0,0,0,.62);font-size:12px;backdrop-filter:blur(8px)}
 #shot{display:none;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
-#frame{display:none;width:100%;height:100%;border:0}
+#status{position:absolute;left:12px;bottom:12px;z-index:3;padding:7px 10px;border-radius:999px;background:rgba(0,0,0,.62);font-size:12px;backdrop-filter:blur(8px)}
+#error{display:none;padding:24px;max-width:520px;text-align:center;line-height:1.45;color:#dbe7f0}
 </style>
 </head>
 <body>
 <div id="root">
   <img id="shot" alt="Ravi Developer Agent live browser">
-  <iframe id="frame" title="Ravi Developer Agent browser"></iframe>
-  <div id="status">Preparing secure browser view…</div>
+  <div id="error"></div>
+  <div id="status">Connecting to browser…</div>
 </div>
 <script>
-const status=document.getElementById("status");
 const shot=document.getElementById("shot");
-const frame=document.getElementById("frame");
+const status=document.getElementById("status");
+const errorBox=document.getElementById("error");
+let stopped=false;
 let timer=null;
-let currentFrameUrl="";
-function startFrames(url){
-  if(currentFrameUrl===url&&timer)return;
-  currentFrameUrl=url;
-  if(timer){clearTimeout(timer);timer=null}
-  frame.style.display="none";
-  shot.style.display="block";
-  const tick=()=>{
-    const sep=url.includes("?")?"&":"?";
-    shot.src=url+sep+"ts="+Date.now();
-  };
-  shot.onload=()=>{
-    status.textContent="Live · read only";
-    timer=setTimeout(tick,650);
-  };
-  shot.onerror=()=>{
-    status.textContent="Live view frame unavailable";
-    timer=setTimeout(tick,1500);
-  };
-  tick();
-}
-function apply(v){
-  const host=window.openai?.toolResponseMetadata;
-  const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;
-  const lv=meta?.liveView;
-  if(!lv)return;
-  if(lv.frameUrl){
-    startFrames(lv.frameUrl);
+async function tick(){
+  if(stopped)return;
+  if(document.hidden){
+    timer=setTimeout(tick,1200);
     return;
   }
-  const u=lv.devtoolsFrontendUrl||lv.url;
-  if(u){
-    if(timer){clearTimeout(timer);timer=null}
-    shot.style.display="none";
-    frame.src=u;
-    frame.style.display="block";
-    status.style.display="none";
+  const api=window.openai;
+  if(!api?.callTool){
+    errorBox.textContent="Browser Live View is unavailable in this ChatGPT client.";
+    errorBox.style.display="block";
+    status.textContent="Live View unavailable";
+    return;
   }
+  try{
+    const result=await api.callTool("browser_screenshot",{});
+    const content=result?.content||result?.mcp_tool_result?.content||result?.call_tool_result?.content||[];
+    const image=Array.isArray(content)?content.find(item=>item?.type==="image"&&item?.data):null;
+    if(!image)throw new Error("Screenshot tool returned no image.");
+    shot.src="data:"+(image.mimeType||"image/png")+";base64,"+image.data;
+    shot.style.display="block";
+    errorBox.style.display="none";
+    status.textContent="Live · read only";
+  }catch(e){
+    status.textContent="Refreshing…";
+  }
+  timer=setTimeout(tick,1200);
 }
-window.addEventListener("message",e=>{
-  const m=e.data;
-  if(m?.method==="ui/notifications/tool-result")apply(m.params)
-});
-apply(window.openai?.toolResponseMetadata);
+window.addEventListener("beforeunload",()=>{stopped=true;if(timer)clearTimeout(timer)});
+tick();
 </script>
 </body>
 </html>`,
@@ -2341,12 +2331,9 @@ apply(window.openai?.toolResponseMetadata);
           ui: {
             prefersBorder: false,
             domain: "https://ravi-developer-agent.rvrmvth.workers.dev",
-            csp: {
-              resourceDomains: [PUBLIC_WORKER_ORIGIN],
-              frameDomains: ["https://live.browser.run"],
-            },
           },
           "openai/ui": { availableDisplayModes: ["inline", "fullscreen"] },
+          "openai/widgetDescription": "Read-only live browser preview rendered from authenticated screenshot tool calls.",
         },
       }],
     };
@@ -2354,48 +2341,20 @@ apply(window.openai?.toolResponseMetadata);
 
   registerTool("browser_live_view", {
     title: "Browser Live View",
-    description: "Create a short-lived read-only live view for an existing browser session. Do not use browser sessions for passwords, API keys, MFA/OTP codes, payment data, or other credentials.",
-    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
-    annotations: { readOnlyHint: false, destructiveHint: false },
+    description: "Open a read-only live preview of the current guarded browser session. The widget refreshes from authenticated screenshots and does not expose browser credentials.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: {},
-    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v3.html" } },
+    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v4.html" } },
   }, async () => {
-    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     const policy = await tenantBrowserPolicy(env, tenant);
-    if (policy.backend === "selfhosted") {
-      const runnerLiveView = await runnerJson<{ url: string; expiresAt?: number }>(
-        env,
-        `/v1/sessions/${encodeURIComponent(policy.sessionId)}/live-view`,
-        { method: "POST" },
-      );
-      const liveViewToken = selfHostedLiveViewToken(env, runnerLiveView.url);
-      return {
-        structuredContent: { browserReady: true, backend: policy.backend },
-        content: [{ type: "text" as const, text: "Secure self-hosted browser live view is ready." }],
-        _meta: {
-          liveView: {
-            frameUrl: `${PUBLIC_WORKER_ORIGIN}/browser-live/${encodeURIComponent(liveViewToken)}/frame`,
-            expiresAt: runnerLiveView.expiresAt,
-          },
-        },
-      };
-    }
-    if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const browserRun = env.BROWSER as any;
-    const targets = await browserRun.devtools.listTargets(policy.sessionId, {
-      liveViewUrlExpiresInMs: 300_000,
-    }) as Array<{ id?: string; type?: string; url?: string }>;
-    const page = targets.find((target) => target.type === "page" && target.url !== "about:blank")
-      ?? targets.find((target) => target.type === "page");
-    const liveView = await browserRun.getLiveView(policy.sessionId, {
-      targetId: page?.id,
-      mode: "tab",
-      expiresInMs: 300_000,
-    });
     return {
-      structuredContent: { browserReady: true, backend: policy.backend },
-      content: [{ type: "text" as const, text: "Secure Cloudflare browser live view is ready." }],
-      _meta: { liveView },
+      structuredContent: {
+        browserReady: true,
+        backend: policy.backend,
+        refreshMode: "authenticated-screenshot-stream",
+      },
+      content: [{ type: "text" as const, text: "Secure read-only browser live view is ready." }],
     };
   });
 
