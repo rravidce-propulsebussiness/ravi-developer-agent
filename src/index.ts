@@ -665,6 +665,168 @@ function createServer(tenant: TenantContext, env: Env) {
     }
   });
 
+  registerTool("browser_click", {
+    title: "Click Browser Element",
+    description: "Click an element in the authenticated tenant browser after explicit confirmation.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {
+      selector: z.string().min(1).max(1000),
+      targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+      confirm: z.boolean().default(false),
+    },
+  }, async ({ selector, targetId, confirm }: { selector: string; targetId?: string; confirm: boolean }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!confirm) return result({ requiresConfirmation: true, action: "browser_click", selector, targetId: targetId ?? null });
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      await page.click(selector);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return result({
+        tenant: tenant.tenantId,
+        targetId: resolvedTargetId,
+        clicked: true,
+        url: page.url(),
+        title: await page.title(),
+      });
+    } finally {
+      browser.disconnect();
+    }
+  });
+
+  registerTool("browser_type", {
+    title: "Type Into Browser",
+    description: "Type non-secret text into a browser field after explicit confirmation. Password, one-time-code, and payment-card fields are blocked; use Interactive Browser Control for those.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {
+      selector: z.string().min(1).max(1000),
+      text: z.string().max(10000),
+      clearFirst: z.boolean().default(false),
+      targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+      confirm: z.boolean().default(false),
+    },
+  }, async ({ selector, text, clearFirst, targetId, confirm }: { selector: string; text: string; clearFirst: boolean; targetId?: string; confirm: boolean }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!confirm) return result({ requiresConfirmation: true, action: "browser_type", selector, targetId: targetId ?? null, characters: text.length });
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      const field = await page.$eval(selector, (el: any) => ({
+        tag: String(el.tagName ?? "").toLowerCase(),
+        type: String(el.type ?? "").toLowerCase(),
+        autocomplete: String(el.autocomplete ?? "").toLowerCase(),
+        name: String(el.name ?? "").toLowerCase(),
+      }));
+      const sensitive = field.type === "password" ||
+        /(password|passwd|secret|token|otp|one-time|cc-|card|cvv|cvc)/.test(field.autocomplete + " " + field.name);
+      if (sensitive) throw new Error("Sensitive credential/payment fields must be completed through Interactive Browser Control.");
+      if (clearFirst) {
+        await page.$eval(selector, (el: any) => {
+          if ("value" in el) {
+            el.focus();
+            el.value = "";
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        });
+      }
+      await page.type(selector, text);
+      return result({
+        tenant: tenant.tenantId,
+        targetId: resolvedTargetId,
+        typed: true,
+        characters: text.length,
+        url: page.url(),
+      });
+    } finally {
+      browser.disconnect();
+    }
+  });
+
+  registerTool("browser_select", {
+    title: "Select Browser Option",
+    description: "Select one or more values in a browser dropdown after explicit confirmation.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {
+      selector: z.string().min(1).max(1000),
+      values: z.array(z.string().max(1000)).min(1).max(20),
+      targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+      confirm: z.boolean().default(false),
+    },
+  }, async ({ selector, values, targetId, confirm }: { selector: string; values: string[]; targetId?: string; confirm: boolean }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!confirm) return result({ requiresConfirmation: true, action: "browser_select", selector, values, targetId: targetId ?? null });
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      const selected = await page.select(selector, ...values);
+      return result({
+        tenant: tenant.tenantId,
+        targetId: resolvedTargetId,
+        selected,
+        url: page.url(),
+      });
+    } finally {
+      browser.disconnect();
+    }
+  });
+
+  registerTool("browser_press", {
+    title: "Press Browser Key",
+    description: "Press a restricted navigation/form key in the tenant browser after explicit confirmation.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    inputSchema: {
+      key: z.enum(["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]),
+      targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+      confirm: z.boolean().default(false),
+    },
+  }, async ({ key, targetId, confirm }: { key: "Enter" | "Escape" | "Tab" | "Backspace" | "Delete" | "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight"; targetId?: string; confirm: boolean }) => {
+    if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+    if (!confirm) return result({ requiresConfirmation: true, action: "browser_press", key, targetId: targetId ?? null });
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      await page.keyboard.press(key);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return result({
+        tenant: tenant.tenantId,
+        targetId: resolvedTargetId,
+        pressed: key,
+        url: page.url(),
+        title: await page.title(),
+      });
+    } finally {
+      browser.disconnect();
+    }
+  });
+
+  registerTool("browser_wait", {
+    title: "Wait For Browser",
+    description: "Wait briefly for a selector or page activity in the current tenant browser.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: {
+      selector: z.string().min(1).max(1000).optional(),
+      timeoutMs: z.number().int().min(100).max(10000).default(3000),
+      targetId: z.string().regex(/^[A-Za-z0-9]+$/).optional(),
+    },
+  }, async ({ selector, timeoutMs, targetId }: { selector?: string; timeoutMs: number; targetId?: string }) => {
+    const { browser, page, targetId: resolvedTargetId } = await connectTenantPage(env, tenant, targetId);
+    try {
+      if (selector) await page.waitForSelector(selector, { timeout: timeoutMs });
+      else await new Promise((resolve) => setTimeout(resolve, timeoutMs));
+      return result({
+        tenant: tenant.tenantId,
+        targetId: resolvedTargetId,
+        ready: true,
+        url: page.url(),
+        title: await page.title(),
+      });
+    } finally {
+      browser.disconnect();
+    }
+  });
+
   registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v1.html", {}, async () => ({
     contents: [{
       uri: "ui://ravi-developer-agent/browser-v1.html",
