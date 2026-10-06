@@ -563,7 +563,17 @@ function createServer(tenant: TenantContext, env: Env) {
       transport: "MCP Streamable HTTP",
       tenant: tenant.tenantId,
       authentication: "oauth-2.1",
-      providers: ["github"],
+      providers: {
+        github: { configured: true, connected: true },
+        cloudflare: {
+          configured: providerConfigured(env, "cloudflare"),
+          connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
+        },
+        supabase: {
+          configured: providerConfigured(env, "supabase"),
+          connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
+        },
+      },
     }),
   );
 
@@ -1495,19 +1505,32 @@ export default {
       return Response.json({
         ok: true,
         service: "ravi-developer-agent",
-        version: "0.3.0",
+        version: "0.4.0",
         authentication: "oauth-2.1",
-      });
+        providerOAuth: {
+          encryptionConfigured: Boolean(env.CONNECTION_ENCRYPTION_KEY),
+          cloudflareConfigured: providerConfigured(env, "cloudflare"),
+          supabaseConfigured: providerConfigured(env, "supabase"),
+        },
+      }, { headers: { "cache-control": "no-store" } });
     }
 
     if (url.pathname === "/") {
       return Response.json({
         name: "Ravi Developer Agent",
-        version: "0.3.0",
+        version: "0.4.0",
         mcp: "/mcp",
         health: "/health",
         authentication: "OAuth 2.1 required for MCP",
       });
+    }
+
+    if (url.pathname === "/oauth/cloudflare/callback") {
+      return providerOAuthCallback(request, env, "cloudflare");
+    }
+
+    if (url.pathname === "/oauth/supabase/callback") {
+      return providerOAuthCallback(request, env, "supabase");
     }
 
     if (url.pathname === "/mcp" || url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
