@@ -571,11 +571,13 @@ async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
   if (!hostnameAllowed(target.hostname, policy.allowedDomains)) {
     throw new Error("Destination hostname is outside this tenant browser session policy.");
   }
-  const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(policy.sessionId) +
-    "/json/new?url=" + encodeURIComponent(target.toString());
-  const response = await env.BROWSER.fetch(endpoint, { method: "PUT" });
-  if (!response.ok) throw new Error(`Browser tab open failed (${response.status}).`);
-  return safeTab(await response.json());
+  const browserRun = env.BROWSER as any;
+  const tab = await browserRun.devtools.newTarget(
+    policy.sessionId,
+    target.toString(),
+    { liveViewUrlExpiresInMs: 300_000 },
+  );
+  return safeTab(tab);
 }
 
 async function connectTenantPage(env: Env, tenant: TenantContext, targetId?: string) {
@@ -1659,13 +1661,13 @@ function createServer(tenant: TenantContext, env: Env) {
     async ({ allowedDomains }: { allowedDomains: string[] }) => {
       if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
       if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-      const response = await env.BROWSER.fetch("https://browser-rendering/devtools/browser?keep_alive=1200000&targets=true&liveViewUrlExpiresInMs=300000", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ guardrails: { allowedDomains } }),
-      });
-      if (!response.ok) throw new Error(`Browser session start failed (${response.status}).`);
-      const session = await response.json() as { sessionId?: string; id?: string };
+      const browserRun = env.BROWSER as any;
+      const session = await browserRun.acquire({
+        keepAlive: 1_200_000,
+        targets: true,
+        liveViewUrlExpiresInMs: 300_000,
+        guardrails: { allowedDomains },
+      }) as { sessionId?: string; id?: string };
       const sessionId = session.sessionId ?? session.id;
       if (!sessionId) throw new Error("Browser provider did not return a session identifier.");
       const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
@@ -1688,9 +1690,10 @@ function createServer(tenant: TenantContext, env: Env) {
   }, async () => {
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
-    const response = await env.BROWSER.fetch(`https://browser-rendering/devtools/browser/${encodeURIComponent(sessionId)}/json/list`);
-    if (!response.ok) throw new Error(`Browser tab listing failed (${response.status}).`);
-    const rawTabs = await response.json() as unknown[];
+    const browserRun = env.BROWSER as any;
+    const rawTabs = await browserRun.devtools.listTargets(sessionId, {
+      liveViewUrlExpiresInMs: 300_000,
+    }) as unknown[];
     return result({ tabs: rawTabs.map(safeTab) });
   });
   registerTool("browser_tab_open", {
@@ -1715,10 +1718,8 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
-    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) +
-      "/json/activate/" + encodeURIComponent(targetId);
-    const response = await env.BROWSER.fetch(endpoint);
-    if (!response.ok) throw new Error(`Browser tab activation failed (${response.status}).`);
+    const browserRun = env.BROWSER as any;
+    await browserRun.devtools.activateTarget(sessionId, targetId);
     return result({ targetId, active: true });
   });
 
@@ -1732,10 +1733,8 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
-    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) +
-      "/json/close/" + encodeURIComponent(targetId);
-    const response = await env.BROWSER.fetch(endpoint);
-    if (!response.ok) throw new Error(`Browser tab close failed (${response.status}).`);
+    const browserRun = env.BROWSER as any;
+    await browserRun.devtools.closeTarget(sessionId, targetId);
     return result({ targetId, closed: true });
   });
 
@@ -1749,11 +1748,8 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
-    const response = await env.BROWSER.fetch(
-      "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId),
-      { method: "DELETE" },
-    );
-    if (!response.ok && response.status !== 404) throw new Error(`Browser session close failed (${response.status}).`);
+    const browserRun = env.BROWSER as any;
+    await browserRun.closeSession(sessionId);
     const ownerId = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
     await env.BROWSER_SESSIONS.get(ownerId).fetch("https://browser-session/session", { method: "DELETE" });
     return result({ closed: true });
@@ -1979,16 +1975,20 @@ function createServer(tenant: TenantContext, env: Env) {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const sessionId = await tenantSessionId(env, tenant);
-    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/live_view";
-    const response = await env.BROWSER.fetch(endpoint, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expiresInMs: 300000, mode: "tab", guardrails: { mode: "readonly" } }),
+    const browserRun = env.BROWSER as any;
+    const targets = await browserRun.devtools.listTargets(sessionId, {
+      liveViewUrlExpiresInMs: 300_000,
+    }) as Array<{ id?: string; type?: string; url?: string }>;
+    const page = targets.find((target) => target.type === "page" && target.url !== "about:blank")
+      ?? targets.find((target) => target.type === "page");
+    const liveView = await browserRun.getLiveView(sessionId, {
+      targetId: page?.id,
+      mode: "tab",
+      expiresInMs: 300_000,
     });
-    if (!response.ok) throw new Error("Live view creation failed.");
-    const liveView = await response.json();
     return {
       structuredContent: { browserReady: true },
-      content: [{ type: "text" as const, text: "Secure read-only browser view is ready." }],
+      content: [{ type: "text" as const, text: "Secure browser live view is ready." }],
       _meta: { liveView },
     };
   });
