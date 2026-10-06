@@ -568,6 +568,107 @@ function selfHostedBrowserOrigin(env: Env): string | null {
   }
 }
 
+const PUBLIC_WORKER_ORIGIN = "https://ravi-developer-agent.rvrmvth.workers.dev";
+
+function selfHostedLiveViewToken(env: Env, liveViewUrl: string): string {
+  const expectedOrigin = selfHostedBrowserOrigin(env);
+  if (!expectedOrigin) throw new Error("Self-hosted browser origin is unavailable.");
+  const url = new URL(liveViewUrl);
+  if (url.origin !== expectedOrigin) throw new Error("Self-hosted Live View origin did not match the configured runner.");
+  const match = url.pathname.match(/^\/view\/([A-Za-z0-9_-]{32,128})\/?$/);
+  if (!match) throw new Error("Self-hosted Live View token is invalid.");
+  return match[1];
+}
+
+function selfHostedLiveViewPage(token: string): string {
+  const framePath = `/browser-live/${encodeURIComponent(token)}/frame`;
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ravi Developer Agent Live View</title>
+<style>
+html,body{width:100%;height:100%;margin:0;background:#07111c;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
+#wrap{position:relative;width:100%;height:100%;display:grid;place-items:center}
+#frame{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
+#status{position:absolute;left:12px;bottom:12px;padding:6px 9px;border-radius:999px;background:rgba(0,0,0,.58);font-size:12px;backdrop-filter:blur(8px)}
+</style>
+</head>
+<body>
+<div id="wrap"><img id="frame" alt="Live browser view"><div id="status">Connecting…</div></div>
+<script>
+const img=document.getElementById("frame");
+const status=document.getElementById("status");
+let stopped=false;
+async function tick(){
+  if(stopped)return;
+  try{
+    const r=await fetch(${JSON.stringify(framePath)}+"?ts="+Date.now(),{cache:"no-store"});
+    if(!r.ok)throw new Error(String(r.status));
+    const blob=await r.blob();
+    const old=img.src;
+    img.src=URL.createObjectURL(blob);
+    if(old&&old.startsWith("blob:"))URL.revokeObjectURL(old);
+    status.textContent="Live · read only";
+  }catch(e){
+    status.textContent="Live view disconnected";
+    stopped=true;
+    return;
+  }
+  setTimeout(tick,650);
+}
+tick();
+</script>
+</body>
+</html>`;
+}
+
+async function selfHostedLiveViewProxy(request: Request, env: Env): Promise<Response | null> {
+  const url = new URL(request.url);
+  const match = url.pathname.match(/^\/browser-live\/([A-Za-z0-9_-]{32,128})(?:\/(frame))?\/?$/);
+  if (!match) return null;
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method not allowed", { status: 405, headers: { allow: "GET, HEAD" } });
+  }
+  const runnerOrigin = selfHostedBrowserOrigin(env);
+  if (!runnerOrigin) return new Response("Live view unavailable", { status: 404 });
+
+  const token = match[1];
+  const frame = match[2] === "frame";
+  if (!frame) {
+    return new Response(request.method === "HEAD" ? null : selfHostedLiveViewPage(token), {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
+
+  const upstream = new URL(`/view/${encodeURIComponent(token)}/frame`, runnerOrigin);
+  if (url.search) upstream.search = url.search;
+  const response = await fetch(upstream.toString(), {
+    method: request.method,
+    redirect: "error",
+    headers: { accept: "image/png" },
+  });
+  if (!response.ok) {
+    return new Response("Live view frame unavailable", {
+      status: response.status,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+  return new Response(request.method === "HEAD" ? null : response.body, {
+    status: 200,
+    headers: {
+      "content-type": response.headers.get("content-type") ?? "image/png",
+      "cache-control": "no-store, max-age=0",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
 async function runnerFetch(env: Env, path: string, init: RequestInit = {}): Promise<Response> {
   if (!selfHostedBrowserConfigured(env)) throw new Error("Self-hosted browser runner is not configured.");
   const base = new URL(env.SELF_HOSTED_BROWSER_URL as string);
@@ -2160,13 +2261,11 @@ function createServer(tenant: TenantContext, env: Env) {
     }
   });
 
-  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v1.html", {}, async () => {
-    const frameDomains = ["https://live.browser.run"];
-    const selfHostedOrigin = selfHostedBrowserOrigin(env);
-    if (selfHostedOrigin) frameDomains.push(selfHostedOrigin);
+  registerAppResource(server, "browser-view", "ui://ravi-developer-agent/browser-v2.html", {}, async () => {
+    const frameDomains = ["https://live.browser.run", PUBLIC_WORKER_ORIGIN];
     return {
       contents: [{
-        uri: "ui://ravi-developer-agent/browser-v1.html",
+        uri: "ui://ravi-developer-agent/browser-v2.html",
         mimeType: RESOURCE_MIME_TYPE,
         text: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#frame{width:100%;height:100%;margin:0}body{font-family:system-ui;background:#111;color:#fff}#status{padding:12px}#frame{border:0;display:none}</style></head><body><div id="status">Preparing secure browser view…</div><iframe id="frame" title="Ravi Developer Agent browser" allow="clipboard-read; clipboard-write"></iframe><script>const status=document.getElementById("status"),frame=document.getElementById("frame");function apply(v){const host=window.openai?.toolResponseMetadata;const meta=v?._meta||host?.mcp_tool_result?._meta||host?.call_tool_result?._meta||host?._meta;const lv=meta?.liveView;const u=lv?.devtoolsFrontendUrl||lv?.url;if(u){frame.src=u;frame.style.display="block";status.style.display="none"}}window.addEventListener("message",e=>{const m=e.data;if(m?.method==="ui/notifications/tool-result")apply(m.params)});apply(window.openai?.toolResponseMetadata);</script></body></html>`,
         _meta: {
@@ -2187,20 +2286,26 @@ function createServer(tenant: TenantContext, env: Env) {
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: {},
-    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v1.html" } },
+    _meta: { ui: { resourceUri: "ui://ravi-developer-agent/browser-v2.html" } },
   }, async () => {
     if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
     const policy = await tenantBrowserPolicy(env, tenant);
     if (policy.backend === "selfhosted") {
-      const liveView = await runnerJson<{ url: string; expiresAt?: number }>(
+      const runnerLiveView = await runnerJson<{ url: string; expiresAt?: number }>(
         env,
         `/v1/sessions/${encodeURIComponent(policy.sessionId)}/live-view`,
         { method: "POST" },
       );
+      const liveViewToken = selfHostedLiveViewToken(env, runnerLiveView.url);
       return {
         structuredContent: { browserReady: true, backend: policy.backend },
         content: [{ type: "text" as const, text: "Secure self-hosted browser live view is ready." }],
-        _meta: { liveView: { url: liveView.url, expiresAt: liveView.expiresAt } },
+        _meta: {
+          liveView: {
+            url: `${PUBLIC_WORKER_ORIGIN}/browser-live/${encodeURIComponent(liveViewToken)}/`,
+            expiresAt: runnerLiveView.expiresAt,
+          },
+        },
       };
     }
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
@@ -2389,6 +2494,9 @@ const SUPPORT_HTML = `
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    const liveViewProxy = await selfHostedLiveViewProxy(request, env);
+    if (liveViewProxy) return liveViewProxy;
 
     if (url.pathname === "/privacy") return publicPage("Privacy Policy", PRIVACY_HTML);
     if (url.pathname === "/terms") return publicPage("Terms of Service", TERMS_HTML);
