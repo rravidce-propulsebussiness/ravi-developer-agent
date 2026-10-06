@@ -2,12 +2,20 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { DurableObject } from "cloudflare:workers";
+import { OAuthResourceServer, insufficientScope, type AuthorizationServerBinding } from "@cloudflare/workers-oauth-provider";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 
+type AuthProps = {
+  userId: string;
+  tenantId: string;
+  subject: string;
+  loginProvider: "github";
+};
+
 type Env = {
-  AUTH_SERVER_URL?: string;
   BROWSER?: Fetcher;
   BROWSER_SESSIONS: DurableObjectNamespace<TenantBrowserSession>;
+  AUTH_SERVER: AuthorizationServerBinding<AuthProps>;
 };
 
 export class TenantBrowserSession extends DurableObject<Env> {
@@ -41,16 +49,6 @@ type TenantContext = {
 function result(data: unknown) {
   const text = JSON.stringify(data);
   return { structuredContent: data as Record<string, unknown>, content: [{ type: "text" as const, text }] };
-}
-
-function tenantFromRequest(request: Request): TenantContext | null {
-  // Temporary boundary only. A dedicated identity provider will replace this
-  // before provider credentials or user data are attached.
-  const subject = request.headers.get("x-agent-subject");
-  const tenantId = request.headers.get("x-agent-tenant");
-  if (!subject || !tenantId) return null;
-  if (!/^[a-zA-Z0-9:_-]{1,128}$/.test(subject) || !/^[a-zA-Z0-9_-]{1,64}$/.test(tenantId)) return null;
-  return { subject, tenantId };
 }
 
 type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
@@ -102,7 +100,7 @@ function createServer(tenant: TenantContext, env: Env) {
       version: "0.2.0",
       transport: "MCP Streamable HTTP",
       tenant: tenant.tenantId,
-      authentication: "boundary-enabled; identity-provider-pending",
+      authentication: "oauth-2.1",
       providers: [],
     }),
   );
@@ -294,57 +292,59 @@ function createServer(tenant: TenantContext, env: Env) {
   return server;
 }
 
+const MCP_RESOURCE = "https://ravi-developer-agent.rvrmvth.workers.dev/mcp";
+const AUTH_ISSUER = "https://ravi-developer-agent-auth.rvrmvth.workers.dev";
+
+const oauthMcp = new OAuthResourceServer<Env, AuthProps>({
+  resourceMetadata: {
+    resource: MCP_RESOURCE,
+    authorization_servers: [AUTH_ISSUER],
+    resource_name: "Ravi Developer Agent",
+  },
+  requiredScopes: ["agent:read"],
+  validateToken: (env) => env.AUTH_SERVER.validateToken,
+  handler: {
+    async fetch(request, env, ctx) {
+      if (!ctx.auth.scope.includes("agent:read")) {
+        return insufficientScope(ctx.auth, ["agent:read"]);
+      }
+      const url = new URL(request.url);
+      if (url.pathname !== "/mcp") return new Response("Not found", { status: 404 });
+      const tenant: TenantContext = {
+        tenantId: ctx.props.tenantId,
+        subject: ctx.props.subject,
+      };
+      const mcp = createMcpHandler(() => createServer(tenant, env), { route: "/mcp" });
+      return mcp(request, env, ctx);
+    },
+  },
+});
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/.well-known/oauth-protected-resource") {
-      const resource = url.origin;
-      const authorizationServer = env.AUTH_SERVER_URL;
-      if (!authorizationServer) {
-        return Response.json(
-          { error: "oauth_not_configured" },
-          { status: 503, headers: { "cache-control": "no-store" } },
-        );
-      }
-      return Response.json({
-        resource,
-        authorization_servers: [authorizationServer],
-        scopes_supported: ["agent:read", "agent:write"],
-        resource_documentation: resource + "/",
-      }, { headers: { "cache-control": "public, max-age=300" } });
-    }
-
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, service: "ravi-developer-agent", version: "0.2.0" });
+      return Response.json({
+        ok: true,
+        service: "ravi-developer-agent",
+        version: "0.3.0",
+        authentication: "oauth-2.1",
+      });
     }
 
     if (url.pathname === "/") {
       return Response.json({
         name: "Ravi Developer Agent",
-        version: "0.2.0",
+        version: "0.3.0",
         mcp: "/mcp",
         health: "/health",
-        authentication: "required for MCP",
+        authentication: "OAuth 2.1 required for MCP",
       });
     }
 
-    if (url.pathname === "/mcp") {
-      const tenant = tenantFromRequest(request);
-      if (!tenant) {
-        return Response.json(
-          { error: "unauthorized", message: "Authenticated tenant context is required." },
-          {
-            status: 401,
-            headers: {
-              "cache-control": "no-store",
-              "WWW-Authenticate": 'Bearer resource_metadata="' + url.origin + '/.well-known/oauth-protected-resource", scope="agent:read"',
-            },
-          },
-        );
-      }
-      const mcp = createMcpHandler(() => createServer(tenant, env), { route: "/mcp" });
-      return mcp(request, env, ctx);
+    if (url.pathname === "/mcp" || url.pathname.startsWith("/.well-known/oauth-protected-resource")) {
+      return oauthMcp.fetch(request, env, ctx);
     }
 
     return new Response("Not found", { status: 404 });
