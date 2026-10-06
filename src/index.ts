@@ -52,13 +52,31 @@ function tenantFromRequest(request: Request): TenantContext | null {
   return { subject, tenantId };
 }
 
-async function tenantSessionId(env: Env, tenant: TenantContext): Promise<string> {
+type TenantBrowserPolicy = { sessionId: string; allowedDomains: string[] };
+
+async function tenantBrowserPolicy(env: Env, tenant: TenantContext): Promise<TenantBrowserPolicy> {
   const id = env.BROWSER_SESSIONS.idFromName(tenant.tenantId);
   const response = await env.BROWSER_SESSIONS.get(id).fetch("https://browser-session/session");
   if (!response.ok) throw new Error("No active browser session for this tenant.");
-  const body = await response.json() as { sessionId?: string };
-  if (!body.sessionId) throw new Error("Tenant browser session is invalid.");
-  return body.sessionId;
+  const body = await response.json() as { sessionId?: string; allowedDomains?: string[] };
+  if (!body.sessionId || !body.allowedDomains?.length) throw new Error("Tenant browser session is invalid.");
+  return { sessionId: body.sessionId, allowedDomains: body.allowedDomains };
+}
+
+async function tenantSessionId(env: Env, tenant: TenantContext): Promise<string> {
+  return (await tenantBrowserPolicy(env, tenant)).sessionId;
+}
+
+function validDomainPattern(value: string): boolean {
+  if (value !== value.toLowerCase() || value.includes("://") || /[/?#:@\\]/.test(value)) return false;
+  if (value === "localhost" || value.endsWith(".localhost")) return false;
+  if ((value.match(/\*/g) ?? []).length > 1) return false;
+  return /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(value);
+}
+
+function hostnameAllowed(hostname: string, patterns: string[]): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return patterns.some((pattern) => pattern.startsWith("*.") ? host.endsWith(pattern.slice(1)) && host !== pattern.slice(2) : host === pattern);
 }
 
 function createServer(tenant: TenantContext) {
@@ -170,7 +188,7 @@ function createServer(tenant: TenantContext) {
       securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: {
-        allowedDomains: z.array(z.string().min(1)).min(1).max(50).describe("Approved hostname patterns for this browser session"),
+        allowedDomains: z.array(z.string().min(1).refine(validDomainPattern, "Use a lowercase public hostname or *.subdomain pattern")).min(1).max(50).describe("Approved public hostname patterns for this browser session"),
       },
     },
     async ({ allowedDomains }) => {
@@ -218,8 +236,9 @@ function createServer(tenant: TenantContext) {
     const target = new URL(url);
     if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("Unsupported URL scheme.");
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
-    const sessionId = await tenantSessionId(env, tenant);
-    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(sessionId) + "/json/new?url=" + encodeURIComponent(target.toString()) + "&liveViewUrlExpiresInMs=300000";
+    const policy = await tenantBrowserPolicy(env, tenant);
+    if (!hostnameAllowed(target.hostname, policy.allowedDomains)) throw new Error("Destination hostname is outside this tenant browser session policy.");
+    const endpoint = "https://browser-rendering/devtools/browser/" + encodeURIComponent(policy.sessionId) + "/json/new?url=" + encodeURIComponent(target.toString()) + "&liveViewUrlExpiresInMs=300000";
     const response = await env.BROWSER.fetch(endpoint, { method: "PUT" });
     if (!response.ok) throw new Error("Browser tab open failed.");
     return result({ tenant: tenant.tenantId, tab: await response.json() });
