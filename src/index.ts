@@ -2683,6 +2683,26 @@ refresh();
     }],
   });
 
+  const browserChatHtml = browserStreamHtml
+    .replace("await ensurePip(api);", "")
+    .replace("ensurePip(api);", "");
+
+  const browserChatResource = (uri: string) => ({
+    contents: [{
+      uri,
+      mimeType: RESOURCE_MIME_TYPE,
+      text: browserChatHtml,
+      _meta: {
+        ui: {
+          prefersBorder: true,
+          domain: "https://ravi-developer-agent.rvrmvth.workers.dev",
+        },
+        "openai/ui": { availableDisplayModes: ["inline"] },
+        "openai/widgetDescription": "Inline live browser view for Ravi Developer Agent. Stays inside the conversation and refreshes the authenticated browser screenshot continuously while the widget is visible.",
+      },
+    }],
+  });
+
   // Keep every historical URI alive because ChatGPT can cache a tool's resource
   // URI for the lifetime of an existing conversation/plugin session.
   registerAppResource(server, "browser-view-v1", "ui://ravi-developer-agent/browser-stream-v1.html", {}, async () =>
@@ -2697,6 +2717,33 @@ refresh();
   registerAppResource(server, "browser-view-v4", "ui://ravi-developer-agent/browser-stream-v4.html", {}, async () =>
     browserStreamResource("ui://ravi-developer-agent/browser-stream-v4.html")
   );
+  registerAppResource(server, "browser-chat-v5", "ui://ravi-developer-agent/browser-chat-v5.html", {}, async () =>
+    browserChatResource("ui://ravi-developer-agent/browser-chat-v5.html")
+  );
+
+  registerTool("browser_live_chat", {
+    title: "Browser Live Chat",
+    description: "Show the guarded browser continuously inside the conversation, TinyFish-style. The inline widget refreshes authenticated screenshots while visible and does not open a right-side panel or PiP window.",
+    securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false },
+    inputSchema: {},
+    _meta: {
+      ui: { resourceUri: "ui://ravi-developer-agent/browser-chat-v5.html" },
+      "openai/outputTemplate": "ui://ravi-developer-agent/browser-chat-v5.html",
+    },
+  }, async () => {
+    const shot = await captureTenantScreenshot(env, tenant);
+    return {
+      structuredContent: {
+        ...shot.structuredContent,
+        browserReady: true,
+        refreshMode: "authenticated-screenshot-stream",
+        preferredDisplayMode: "inline",
+        viewer: "browser_live_chat_v1",
+      },
+      content: shot.content,
+    };
+  });
 
   registerTool("browser_live_view", {
     title: "Browser Live View",
