@@ -119,7 +119,7 @@ function createServer(tenant: TenantContext, env: Env) {
         repository: z.string().optional().describe("owner/repository when known"),
       },
     },
-    async ({ task, repository }) => result({
+    async ({ task, repository }: { task: string; repository?: string }) => result({
       tenant: tenant.tenantId,
       task,
       repository: repository ?? null,
@@ -170,7 +170,7 @@ function createServer(tenant: TenantContext, env: Env) {
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: { url: z.string().url() },
     },
-    async ({ url }) => {
+    async ({ url }: { url: string }) => {
       const target = new URL(url);
       if (!["http:", "https:"].includes(target.protocol)) throw new Error("Only HTTP/HTTPS URLs are allowed.");
       const host = target.hostname.toLowerCase();
@@ -197,7 +197,7 @@ function createServer(tenant: TenantContext, env: Env) {
         allowedDomains: z.array(z.string().min(1).refine(validDomainPattern, "Use a lowercase public hostname or *.subdomain pattern")).min(1).max(50).describe("Approved public hostname patterns for this browser session"),
       },
     },
-    async ({ allowedDomains }) => {
+    async ({ allowedDomains }: { allowedDomains: string[] }) => {
       if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
       const response = await env.BROWSER.fetch("https://browser-rendering/devtools/browser?keep_alive=1200000&targets=true&liveViewUrlExpiresInMs=300000", {
         method: "POST",
@@ -238,7 +238,7 @@ function createServer(tenant: TenantContext, env: Env) {
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: { url: z.string().url() },
-  }, async ({ url }) => {
+  }, async ({ url }: { url: string }) => {
     const target = new URL(url);
     if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("Unsupported URL scheme.");
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
@@ -255,7 +255,7 @@ function createServer(tenant: TenantContext, env: Env) {
     securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false },
     inputSchema: { url: z.string().url() },
-  }, async ({ url }) => {
+  }, async ({ url }: { url: string }) => {
     if (!env.BROWSER) throw new Error("Cloud browser binding is unavailable.");
     const response = await env.BROWSER.fetch("https://browser-rendering/screenshot", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url }) });
     if (!response.ok) throw new Error("Browser preview failed.");
