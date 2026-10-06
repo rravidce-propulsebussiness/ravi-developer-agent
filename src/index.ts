@@ -2122,6 +2122,12 @@ function publicPage(title: string, body: string): Response {
   });
 }
 
+const HOME_HTML = `
+<p>Ravi Developer Agent is a developer-tools service for working with user-authorized GitHub repositories, Cloudflare deployments, Supabase projects, and tenant-isolated cloud-browser sessions from ChatGPT.</p>
+<h2>Capabilities</h2><p>Inspect repositories, prepare confirmed code changes, inspect and trigger cloud deployments, run read-only Supabase queries, apply confirmed migrations, and test web applications through a guarded browser session.</p>
+<h2>Security model</h2><p>Each user authenticates through OAuth. Provider connections and browser sessions are tenant-scoped. Consequential tools require write authorization and confirmation. Passwords, one-time codes, provider tokens, and Worker secret values are not intended to be entered into normal chat.</p>
+<h2>Resources</h2><p><a href="/support">Support</a> · <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>`;
+
 const PRIVACY_HTML = `
 <p>Ravi Developer Agent helps users work with software projects through user-authorized GitHub, Cloudflare, Supabase, and cloud-browser connections.</p>
 <h2>Data we process</h2><p>We process the account identity, a verified email address for OAuth workspace-domain protections, repository or project information, tool inputs, and provider authorization tokens required to perform requested actions. Provider tokens remain server-side and are not intentionally returned in MCP tool output. Browser sessions are isolated per tenant.</p>
@@ -2174,15 +2180,7 @@ export default {
       }, { headers: { "cache-control": "no-store" } });
     }
 
-    if (url.pathname === "/") {
-      return Response.json({
-        name: "Ravi Developer Agent",
-        version: "0.6.1",
-        mcp: "/mcp",
-        health: "/health",
-        authentication: "OAuth 2.1 required for MCP",
-      });
-    }
+    if (url.pathname === "/") return publicPage("Ravi Developer Agent", HOME_HTML);
 
     if (url.pathname === "/oauth/cloudflare/callback") {
       return providerOAuthCallback(request, env, "cloudflare");
