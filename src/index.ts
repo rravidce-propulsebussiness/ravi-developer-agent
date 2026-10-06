@@ -18,6 +18,8 @@ type Env = {
   BROWSER?: Fetcher;
   BROWSER_SESSIONS: DurableObjectNamespace<TenantBrowserSession>;
   AUTH_SERVER: AuthorizationServerBinding<AuthProps>;
+  CONNECTIONS_KV: KVNamespace;
+  CONNECTION_ENCRYPTION_KEY?: CryptoKey;
 };
 
 export class TenantBrowserSession extends DurableObject<Env> {
@@ -71,6 +73,66 @@ function safeTab(value: unknown) {
     url: typeof tab.url === "string" ? tab.url : "",
   };
 }
+
+type ProviderName = "github" | "cloudflare" | "supabase";
+
+function providerConnectionKey(tenant: TenantContext, provider: ProviderName): string {
+  return `v1:tenant:${tenant.tenantId}:provider:${provider}`;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function storeProviderConnection(
+  env: Env,
+  tenant: TenantContext,
+  provider: ProviderName,
+  value: Record<string, unknown>,
+): Promise<void> {
+  if (!env.CONNECTION_ENCRYPTION_KEY) throw new Error("Provider connection encryption is not configured.");
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(value));
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    env.CONNECTION_ENCRYPTION_KEY,
+    plaintext,
+  );
+  await env.CONNECTIONS_KV.put(
+    providerConnectionKey(tenant, provider),
+    JSON.stringify({
+      version: 1,
+      iv: bytesToBase64(iv),
+      ciphertext: bytesToBase64(new Uint8Array(encrypted)),
+    }),
+  );
+}
+
+async function readProviderConnection(
+  env: Env,
+  tenant: TenantContext,
+  provider: ProviderName,
+): Promise<Record<string, unknown> | null> {
+  if (!env.CONNECTION_ENCRYPTION_KEY) return null;
+  const stored = await env.CONNECTIONS_KV.get(providerConnectionKey(tenant, provider));
+  if (!stored) return null;
+  const payload = JSON.parse(stored) as { version?: number; iv?: string; ciphertext?: string };
+  if (payload.version !== 1 || !payload.iv || !payload.ciphertext) throw new Error("Provider connection record is invalid.");
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: base64ToBytes(payload.iv) },
+    env.CONNECTION_ENCRYPTION_KEY,
+    base64ToBytes(payload.ciphertext),
+  );
+  return JSON.parse(new TextDecoder().decode(decrypted)) as Record<string, unknown>;
+}
+
 
 function result(data: unknown) {
   const text = JSON.stringify(data);
@@ -177,6 +239,45 @@ function createServer(tenant: TenantContext, env: Env) {
       provider: "github",
       tenant: tenant.tenantId,
     }),
+  );
+
+  registerTool(
+    "provider_connections",
+    {
+      title: "Provider Connections",
+      description: "Show which external developer providers are connected for the authenticated tenant without exposing credentials.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: {},
+    },
+    async () => {
+      const providers: ProviderName[] = ["github", "cloudflare", "supabase"];
+      const connections = await Promise.all(providers.map(async (provider) => ({
+        provider,
+        connected: (await env.CONNECTIONS_KV.get(providerConnectionKey(tenant, provider))) !== null,
+      })));
+      return result({
+        tenant: tenant.tenantId,
+        encryptedStorageReady: Boolean(env.CONNECTION_ENCRYPTION_KEY),
+        connections,
+      });
+    },
+  );
+
+  registerTool(
+    "provider_disconnect",
+    {
+      title: "Disconnect Provider",
+      description: "Delete the authenticated tenant's stored connection for one developer provider.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: { provider: z.enum(["github", "cloudflare", "supabase"]) },
+    },
+    async ({ provider }: { provider: ProviderName }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      await env.CONNECTIONS_KV.delete(providerConnectionKey(tenant, provider));
+      return result({ tenant: tenant.tenantId, provider, connected: false });
+    },
   );
 
   registerTool(
