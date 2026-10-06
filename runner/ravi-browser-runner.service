@@ -1,0 +1,22 @@
+[Unit]
+Description=Ravi Developer Agent Self-hosted Browser Runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ravi-browser-runner
+EnvironmentFile=/opt/ravi-browser-runner/.env
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=3
+User=ravi-browser
+Group=ravi-browser
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ravi-browser-runner
+
+[Install]
+WantedBy=multi-user.target
