@@ -55,3 +55,35 @@ Configure these Ravi Developer Agent Worker secrets/variables:
 - `SELF_HOSTED_BROWSER_TOKEN=<same RUNNER_TOKEN>`
 
 When both values exist, the Worker uses this runner first. Cloudflare Browser Run remains the fallback when the self-hosted runner is not configured.
+
+
+## Zero-domain Windows test with Cloudflare Quick Tunnel
+
+You do not need to move `sghomesinterior.in` DNS to Cloudflare for testing.
+
+Run:
+
+```powershell
+cd runner
+.\setup-windows.ps1
+.\start-quick-tunnel-windows.ps1
+```
+
+The Quick Tunnel script downloads `cloudflared` locally if needed, creates a temporary `https://*.trycloudflare.com` URL, writes that URL into `.env`, and starts the Chromium runner.
+
+In a second PowerShell window run:
+
+```powershell
+cd runner
+.\connect-worker-windows.ps1
+```
+
+That script reads `RUNNER_TOKEN` locally and writes both `SELF_HOSTED_BROWSER_URL` and `SELF_HOSTED_BROWSER_TOKEN` directly to the `ravi-developer-agent` Worker through Wrangler. The token is never printed into the terminal or copied into ChatGPT.
+
+To stop the local runner and tunnel:
+
+```powershell
+.\stop-windows.ps1
+```
+
+Quick Tunnel hostnames change when restarted. Run `connect-worker-windows.ps1` again after a new Quick Tunnel is created. For a permanent 24/7 endpoint, use a VPS or a named tunnel on a Cloudflare-managed domain.
