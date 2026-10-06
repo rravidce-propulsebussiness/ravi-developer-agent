@@ -26,12 +26,14 @@ type AuthProps = {
   loginProvider: "github";
   login: string;
   githubToken: string;
+  email: string;
+  emailVerified: true;
 };
 
 const authorizationServer = new OAuthAuthorizationServer<AuthEnv>({
   issuer: AUTH_ISSUER,
   resources: [MCP_RESOURCE],
-  scopesSupported: ["agent:read", "agent:write", "offline_access"],
+  scopesSupported: ["openid", "email", "agent:read", "agent:write", "offline_access"],
   clientIdMetadataDocumentEnabled: true,
   clientRegistrationEndpoint: "/oauth/register",
 });
@@ -197,6 +199,7 @@ async function githubManifestPage(env: AuthEnv): Promise<Response> {
       contents: "write",
       pull_requests: "write",
       workflows: "write",
+      email_addresses: "read",
     },
   };
   const safeManifest = escapeHtml(JSON.stringify(manifest));
@@ -493,6 +496,20 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
   const user = await userResponse.json() as { id?: number; login?: string };
   if (!user.id) return new Response("GitHub identity is invalid.", { status: 502 });
 
+  const emailsResponse = await fetch("https://api.github.com/user/emails?per_page=100", {
+    headers: {
+      "accept": "application/vnd.github+json",
+      "authorization": `Bearer ${token.access_token}`,
+      "user-agent": "ravi-developer-agent",
+      "x-github-api-version": "2026-03-10",
+    },
+  });
+  if (!emailsResponse.ok) return new Response("GitHub verified email lookup failed.", { status: 502 });
+  const emails = await emailsResponse.json() as Array<{ email?: string; primary?: boolean; verified?: boolean }>;
+  const verifiedEmail = emails.find((item) => item.primary && item.verified && item.email)?.email
+    ?? emails.find((item) => item.verified && item.email)?.email;
+  if (!verifiedEmail) return new Response("A verified GitHub email is required to connect Ravi Developer Agent.", { status: 403 });
+
   const userId = `github-${user.id}`;
   await saveGithubUserToken(env, userId, {
     access_token: token.access_token,
@@ -507,11 +524,13 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
     loginProvider: "github",
     login: user.login ?? userId,
     githubToken: token.access_token,
+    email: verifiedEmail,
+    emailVerified: true,
   };
   const completed = await oauth.completeAuthorization({
     request: resumed.request,
     userId,
-    metadata: { provider: "github", login: user.login ?? "" },
+    metadata: { provider: "github", login: user.login ?? "", email_verified: true },
     scope: resumed.request.scope,
     props,
   });
@@ -519,9 +538,72 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
   return new Response(null, { status: 302, headers: resumed.headers });
 }
 
+function openIdConfiguration(): Response {
+  return Response.json({
+    issuer: AUTH_ISSUER,
+    authorization_endpoint: AUTH_ISSUER + "/authorize",
+    token_endpoint: AUTH_ISSUER + "/oauth/token",
+    userinfo_endpoint: AUTH_ISSUER + "/userinfo",
+    registration_endpoint: AUTH_ISSUER + "/oauth/register",
+    scopes_supported: ["openid", "email", "agent:read", "agent:write", "offline_access"],
+    response_types_supported: ["code"],
+    response_modes_supported: ["query"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    token_endpoint_auth_methods_supported: ["client_secret_basic", "client_secret_post", "none"],
+    code_challenge_methods_supported: ["S256"],
+    authorization_response_iss_parameter_supported: true,
+    client_id_metadata_document_supported: true,
+    subject_types_supported: ["public"],
+    claims_supported: ["sub", "email", "email_verified"],
+  }, { headers: { "cache-control": "public, max-age=300" } });
+}
+
+async function userInfo(request: Request, env: AuthEnv): Promise<Response> {
+  const authorization = request.headers.get("authorization") ?? "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    return new Response("Unauthorized", {
+      status: 401,
+      headers: {
+        "www-authenticate": 'Bearer error="invalid_token", error_description="A bearer access token is required"',
+        "cache-control": "no-store",
+      },
+    });
+  }
+  const validated = await authorizationServer.validateToken(MCP_RESOURCE, match[1], env);
+  if (!validated) {
+    return new Response("Unauthorized", {
+      status: 401,
+      headers: {
+        "www-authenticate": 'Bearer error="invalid_token", error_description="The access token is invalid or expired"',
+        "cache-control": "no-store",
+      },
+    });
+  }
+  if (!validated.scope.includes("openid") || !validated.scope.includes("email")) {
+    return new Response("Insufficient scope", {
+      status: 403,
+      headers: {
+        "www-authenticate": 'Bearer error="insufficient_scope", scope="openid email"',
+        "cache-control": "no-store",
+      },
+    });
+  }
+  if (!validated.props.email || validated.props.emailVerified !== true) {
+    return new Response("Verified email unavailable", { status: 403, headers: { "cache-control": "no-store" } });
+  }
+  return Response.json({
+    sub: validated.userId,
+    email: validated.props.email,
+    email_verified: true,
+  }, { headers: { "cache-control": "no-store" } });
+}
+
 export class AuthServer extends WorkerEntrypoint<AuthEnv> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/.well-known/openid-configuration") return openIdConfiguration();
+    if (url.pathname === "/userinfo") return userInfo(request, this.env);
     if (url.pathname === "/health") {
       return Response.json({
         ok: true,
