@@ -20,6 +20,7 @@ type AuthProps = {
   tenantId: string;
   subject: string;
   loginProvider: "github";
+  login: string;
 };
 
 const authorizationServer = new OAuthAuthorizationServer<AuthEnv>({
@@ -184,6 +185,7 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
     tenantId: `gh-${user.id}`,
     subject: userId,
     loginProvider: "github",
+    login: user.login ?? userId,
   };
   const completed = await oauth.completeAuthorization({
     request: resumed.request,
