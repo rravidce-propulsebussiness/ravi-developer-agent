@@ -245,6 +245,7 @@ async function createSession(allowedDomains, profileName = null) {
     activeTargetId: null,
     profileName: normalizedProfile,
     profileLoaded,
+    generatedSecrets: new Map(),
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
   });
@@ -380,6 +381,30 @@ async function performAction(session, body) {
       const locator = page.locator(selector).first();
       await locator.fill(secret);
       return { ...(await pageMetadata(page, resolvedTargetId)), filled: true, secretName: secretName.toLowerCase() };
+    }
+    if (action === "fillGeneratedSecret") {
+      const selector = String(body.selector || "");
+      const alias = String(body.alias || "").trim().toLowerCase();
+      if (!selector || !/^[a-z0-9_-]{1,64}$/.test(alias)) throw Object.assign(new Error("invalid_generated_secret_request"), { statusCode: 400 });
+      let secret = session.generatedSecrets.get(alias);
+      if (!secret) {
+        secret = crypto.randomBytes(18).toString("base64url") + "A1";
+        session.generatedSecrets.set(alias, secret);
+      }
+      const locator = page.locator(selector).first();
+      await locator.fill(secret);
+      return { ...(await pageMetadata(page, resolvedTargetId)), filled: true, generatedSecretAlias: alias, characters: secret.length };
+    }
+    if (action === "uploadGeneratedTestFile") {
+      const selector = String(body.selector || "");
+      if (!selector) throw Object.assign(new Error("selector_required"), { statusCode: 400 });
+      const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zr5sAAAAASUVORK5CYII=", "base64");
+      await page.locator(selector).first().setInputFiles({
+        name: "propulse-test-company-proof.png",
+        mimeType: "image/png",
+        buffer: png,
+      });
+      return { ...(await pageMetadata(page, resolvedTargetId)), uploaded: true, testFile: true, name: "propulse-test-company-proof.png", size: png.length };
     }
     if (action === "uploadFiles") {
       const selector = String(body.selector || "");
