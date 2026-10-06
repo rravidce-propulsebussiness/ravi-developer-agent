@@ -5,6 +5,7 @@ import { DurableObject } from "cloudflare:workers";
 import { OAuthResourceServer, insufficientScope, type AuthorizationServerBinding } from "@cloudflare/workers-oauth-provider";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import puppeteer from "@cloudflare/puppeteer";
+import { hostnameAllowed, validDomainPattern } from "./security";
 
 type AuthProps = {
   userId: string;
@@ -558,19 +559,6 @@ async function tenantBrowserPolicy(env: Env, tenant: TenantContext): Promise<Ten
 async function tenantSessionId(env: Env, tenant: TenantContext): Promise<string> {
   return (await tenantBrowserPolicy(env, tenant)).sessionId;
 }
-
-function validDomainPattern(value: string): boolean {
-  if (value !== value.toLowerCase() || value.includes("://") || /[/?#:@\\]/.test(value)) return false;
-  if (value === "localhost" || value.endsWith(".localhost")) return false;
-  if ((value.match(/\*/g) ?? []).length > 1) return false;
-  return /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(value);
-}
-
-function hostnameAllowed(hostname: string, patterns: string[]): boolean {
-  const host = hostname.toLowerCase().replace(/\.$/, "");
-  return patterns.some((pattern) => pattern.startsWith("*.") ? host.endsWith(pattern.slice(1)) && host !== pattern.slice(2) : host === pattern);
-}
-
 
 async function openTenantTab(env: Env, tenant: TenantContext, url: string) {
   const target = new URL(url);
