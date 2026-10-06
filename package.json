@@ -14,7 +14,8 @@
     "@modelcontextprotocol/server": "2.0.0",
     "agents": "latest",
     "zod": "latest",
-    "@cloudflare/workers-oauth-provider": "^1.0.0"
+    "@cloudflare/workers-oauth-provider": "^1.0.0",
+    "@modelcontextprotocol/ext-apps": "latest"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
