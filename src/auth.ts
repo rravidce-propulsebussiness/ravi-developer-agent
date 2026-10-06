@@ -21,6 +21,7 @@ type AuthProps = {
   subject: string;
   loginProvider: "github";
   login: string;
+  githubToken: string;
 };
 
 const authorizationServer = new OAuthAuthorizationServer<AuthEnv>({
@@ -91,7 +92,7 @@ async function startGithubSignIn(_request: Request, env: AuthEnv, approvedReques
   target.searchParams.set("state", upstream.state);
   target.searchParams.set("code_challenge", await s256(verifier));
   target.searchParams.set("code_challenge_method", "S256");
-  target.searchParams.set("scope", "read:user");
+  target.searchParams.set("scope", "read:user repo");
   upstream.headers.set("Location", target.toString());
   return new Response(null, { status: 302, headers: upstream.headers });
 }
@@ -186,6 +187,7 @@ async function githubCallback(request: Request, env: AuthEnv): Promise<Response>
     subject: userId,
     loginProvider: "github",
     login: user.login ?? userId,
+    githubToken: token.access_token,
   };
   const completed = await oauth.completeAuthorization({
     request: resumed.request,
