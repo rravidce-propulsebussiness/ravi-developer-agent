@@ -835,6 +835,212 @@ function createServer(tenant: TenantContext, env: Env) {
     },
   );
 
+
+  registerTool(
+    "cloudflare_connection_status",
+    {
+      title: "Cloudflare Connection",
+      description: "Check whether Cloudflare OAuth is configured and connected for this tenant.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => result({
+      provider: "cloudflare",
+      configured: providerConfigured(env, "cloudflare"),
+      connected: await providerConnectionExists(env, tenant.tenantId, "cloudflare"),
+      tenant: tenant.tenantId,
+    }),
+  );
+
+  registerTool(
+    "cloudflare_connect",
+    {
+      title: "Connect Cloudflare",
+      description: "Start a secure Cloudflare OAuth connection using PKCE. The user must review and approve Cloudflare's consent screen.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: { confirm: z.boolean().default(false) },
+    },
+    async ({ confirm }: { confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "connect_cloudflare" });
+      if (!providerConfigured(env, "cloudflare")) {
+        return result({
+          provider: "cloudflare",
+          configured: false,
+          message: "Cloudflare OAuth client credentials and provider encryption must be configured by the app owner first.",
+        });
+      }
+      return result({
+        provider: "cloudflare",
+        configured: true,
+        connectUrl: await beginProviderOAuth(env, tenant, "cloudflare"),
+        expiresInSeconds: 600,
+      });
+    },
+  );
+
+  registerTool(
+    "cloudflare_list_accounts",
+    {
+      title: "List Cloudflare Accounts",
+      description: "List Cloudflare accounts authorized for the connected tenant.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch("https://api.cloudflare.com/client/v4/accounts?per_page=50", {
+        headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Cloudflare account listing failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: Array<{ id?: string; name?: string; type?: string }>;
+      };
+      if (body.success === false) throw new Error("Cloudflare account listing failed.");
+      return result({
+        provider: "cloudflare",
+        accounts: (body.result ?? []).map((account) => ({
+          id: account.id ?? null,
+          name: account.name ?? null,
+          type: account.type ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "cloudflare_list_workers",
+    {
+      title: "List Cloudflare Workers",
+      description: "List Worker scripts in an authorized Cloudflare account.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { accountId: z.string().regex(/^[A-Fa-f0-9]{32}$/) },
+    },
+    async ({ accountId }: { accountId: string }) => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "cloudflare");
+      const response = await fetch("https://api.cloudflare.com/client/v4/accounts/" + encodeURIComponent(accountId) + "/workers/scripts", {
+        headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Cloudflare Worker listing failed (" + response.status + ").");
+      const body = await response.json() as {
+        success?: boolean;
+        result?: Array<{ id?: string; modified_on?: string; created_on?: string }>;
+      };
+      if (body.success === false) throw new Error("Cloudflare Worker listing failed.");
+      return result({
+        provider: "cloudflare",
+        accountId,
+        workers: (body.result ?? []).map((worker) => ({
+          name: worker.id ?? null,
+          createdAt: worker.created_on ?? null,
+          modifiedAt: worker.modified_on ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "supabase_connection_status",
+    {
+      title: "Supabase Connection",
+      description: "Check whether Supabase OAuth is configured and connected for this tenant.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => result({
+      provider: "supabase",
+      configured: providerConfigured(env, "supabase"),
+      connected: await providerConnectionExists(env, tenant.tenantId, "supabase"),
+      tenant: tenant.tenantId,
+    }),
+  );
+
+  registerTool(
+    "supabase_connect",
+    {
+      title: "Connect Supabase",
+      description: "Start a secure Supabase Management API OAuth connection using PKCE. The user must review and approve Supabase's consent screen.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: false },
+      inputSchema: { confirm: z.boolean().default(false) },
+    },
+    async ({ confirm }: { confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "connect_supabase" });
+      if (!providerConfigured(env, "supabase")) {
+        return result({
+          provider: "supabase",
+          configured: false,
+          message: "Supabase OAuth client credentials and provider encryption must be configured by the app owner first.",
+        });
+      }
+      return result({
+        provider: "supabase",
+        configured: true,
+        connectUrl: await beginProviderOAuth(env, tenant, "supabase"),
+        expiresInSeconds: 600,
+      });
+    },
+  );
+
+  registerTool(
+    "supabase_list_projects",
+    {
+      title: "List Supabase Projects",
+      description: "List Supabase projects available to the connected tenant through the Management API.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read"] }],
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    },
+    async () => {
+      const connection = await activeProviderConnection(env, tenant.tenantId, "supabase");
+      const response = await fetch("https://api.supabase.com/v1/projects", {
+        headers: { authorization: "Bearer " + connection.accessToken, accept: "application/json" },
+      });
+      if (!response.ok) throw new Error("Supabase project listing failed (" + response.status + ").");
+      const projects = await response.json() as Array<{
+        id?: string;
+        ref?: string;
+        name?: string;
+        region?: string;
+        status?: string;
+        organization_id?: string;
+      }>;
+      return result({
+        provider: "supabase",
+        projects: projects.map((project) => ({
+          id: project.id ?? project.ref ?? null,
+          name: project.name ?? null,
+          region: project.region ?? null,
+          status: project.status ?? null,
+          organizationId: project.organization_id ?? null,
+        })),
+      });
+    },
+  );
+
+  registerTool(
+    "provider_disconnect",
+    {
+      title: "Disconnect Provider",
+      description: "Delete this tenant's locally stored encrypted Cloudflare or Supabase provider connection after explicit confirmation.",
+      securitySchemes: [{ type: "oauth2", scopes: ["agent:read", "agent:write"] }],
+      annotations: { readOnlyHint: false, destructiveHint: true },
+      inputSchema: {
+        provider: z.enum(["cloudflare", "supabase"]),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ provider, confirm }: { provider: ProviderName; confirm: boolean }) => {
+      if (!tenant.scopes.includes("agent:write")) return toolAuthRequired(["agent:read", "agent:write"]);
+      if (!confirm) return result({ requiresConfirmation: true, action: "disconnect_provider", provider });
+      await deleteProviderConnection(env, tenant.tenantId, provider);
+      return result({ provider, connected: false, deleted: true });
+    },
+  );
+
   registerTool(
     "browser_capabilities",
     {
